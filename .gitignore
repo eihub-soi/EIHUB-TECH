@@ -37,3 +37,7 @@ scratch/
 # Python cache
 __pycache__/
 *.pyc
+
+# Local SQLite databases
+*.db
+test_database.db
