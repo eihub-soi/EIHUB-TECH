@@ -143,6 +143,7 @@ async def email_worker():
 # ----------------------------------------------------
 # ENVIRONMENT VARIABLES & VALIDATION
 # ----------------------------------------------------
+startup_error = None
 required_env_vars = [
     "CLOUDFLARE_ACCOUNT_ID",
     "CLOUDFLARE_API_TOKEN",
@@ -151,9 +152,11 @@ required_env_vars = [
 
 missing_vars = [var for var in required_env_vars if not os.environ.get(var)]
 if missing_vars:
-    raise Exception(f"Startup failed: Missing required environment variables: {', '.join(missing_vars)}")
+    startup_error = f"Missing required environment variables: {', '.join(missing_vars)}"
+    print(f"Startup Warning: {startup_error}")
 
 # Initialize Firebase Admin SDK
+firebase_initialized = False
 try:
     if not firebase_admin._apps:
         firebase_creds_json = os.environ.get("FIREBASE_CREDENTIALS")
@@ -162,6 +165,7 @@ try:
             cred_dict = json.loads(firebase_creds_json)
             cred = credentials.Certificate(cred_dict)
             firebase_admin.initialize_app(cred)
+            firebase_initialized = True
             print("Firebase Admin SDK initialized successfully using FIREBASE_CREDENTIALS env var.")
         else:
             # Fallback to json path if available
@@ -169,10 +173,12 @@ try:
             if os.path.exists(json_path):
                 cred = credentials.Certificate(json_path)
                 firebase_admin.initialize_app(cred)
+                firebase_initialized = True
                 print("Firebase Admin SDK initialized successfully using JSON file.")
             else:
                 print("Warning: Firebase Admin SDK initialization failed: No JSON file or env vars.")
     else:
+        firebase_initialized = True
         print("Firebase Admin SDK already initialized.")
 except Exception as e:
     print(f"Warning: Firebase Admin SDK initialization failed: {e}. Programmatic reset link generation will not be active.")
@@ -251,6 +257,8 @@ db_initialized: bool = False
 
 async def get_db_client() -> Any:
     global client, db_initialized
+    if startup_error:
+        raise HTTPException(status_code=500, detail=f"Database connection failed due to startup error: {startup_error}")
     if client is None or not db_initialized:
         async with db_lock:
             if client is None:
@@ -269,8 +277,12 @@ async def get_db_client() -> Any:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Pre-initialize client on startup if lifespan runs
-    await get_db_client()
+    # Pre-initialize client on startup if lifespan runs and no startup error exists
+    if not startup_error:
+        try:
+            await get_db_client()
+        except Exception as e:
+            print(f"[Lifespan Error] get_db_client failed: {e}")
     
     # Pre-cache PDF banner on startup
     from app.services.pdf_service import get_pdf_banner
@@ -330,6 +342,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Startup Error Middleware
+@app.middleware("http")
+async def check_startup_error_middleware(request: Request, call_next):
+    if startup_error and request.url.path.startswith("/api") and not request.url.path.endswith("/health"):
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"Startup Error: {startup_error}"}
+        )
+    return await call_next(request)
 
 # Security Headers Middleware
 @app.middleware("http")
@@ -898,6 +920,15 @@ async def send_otp(data: dict = Body(...)):
     # Enqueue the email to be sent by worker
     await EMAIL_QUEUE.put((email, "EI HUB - Student Verification OTP Code", html, None))
     return {"status": "success", "message": "OTP queued for sending"}
+
+@app.get("/api/health")
+async def health_check():
+    return {
+        "status": "error" if startup_error else "ok",
+        "startup_error": startup_error,
+        "firebase_configured": firebase_initialized,
+        "database_connected": client is not None and db_initialized
+    }
 
 @app.get("/api/components")
 async def get_components(page: Optional[int] = None, limit: Optional[int] = None):
