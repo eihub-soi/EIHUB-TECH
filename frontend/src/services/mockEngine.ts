@@ -320,7 +320,17 @@ class MockEngine {
     const comp = comps.find((c) => c.id === componentId);
     const student = this.getProfiles().find((p) => p.id === studentId);
 
-    const reqCode = `REQ-${crypto.randomUUID().substring(0, 8).toUpperCase()}`;
+    const existingReqs = this.getRequests();
+    let maxNum = 0;
+    existingReqs.forEach((r) => {
+      if (r.request_code && r.request_code.startsWith("REQ-")) {
+        const numPart = parseInt(r.request_code.substring(4), 10);
+        if (!isNaN(numPart) && numPart > maxNum) {
+          maxNum = numPart;
+        }
+      }
+    });
+    const reqCode = `REQ-${maxNum + 1}`;
     const newReq: BorrowRequest = {
       id: crypto.randomUUID(),
       request_code: reqCode,

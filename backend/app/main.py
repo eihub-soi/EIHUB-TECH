@@ -625,6 +625,34 @@ async def db_batch(statements: List[Any]) -> Any:
             print(f"[DB Batch Retry] Attempt {attempt + 1} failed. Retrying in {delay}s...")
             await asyncio.sleep(delay)
             delay *= 2
+async def get_all_request_codes() -> Dict[str, str]:
+    rows = await db_query("SELECT id, requested_at FROM requests ORDER BY requested_at ASC, id ASC")
+    mapping = {}
+    for i, row in enumerate(rows):
+        req_id = row["id"]
+        if req_id.startswith("req-"):
+            try:
+                val = int(req_id[4:])
+                mapping[req_id] = f"REQ-{val}"
+            except Exception:
+                mapping[req_id] = f"REQ-{i+1}"
+        else:
+            mapping[req_id] = f"REQ-{i+1}"
+    return mapping
+
+async def get_single_request_code(req_id: str, requested_at: str) -> str:
+    if req_id.startswith("req-"):
+        try:
+            val = int(req_id[4:])
+            return f"REQ-{val}"
+        except Exception:
+            pass
+    res = await db_query(
+        "SELECT COUNT(*) as count FROM requests WHERE requested_at < ? OR (requested_at = ? AND id <= ?)",
+        [requested_at, requested_at, req_id]
+    )
+    count = res[0]["count"] if res else 1
+    return f"REQ-{count}"
 
 # Token validation helper
 security = HTTPBearer()
@@ -1222,6 +1250,7 @@ async def get_requests(page: Optional[int] = None, limit: Optional[int] = None, 
             rows = await db_query(sql, query_params)
             
         cleaned_rows = []
+        mapping = await get_all_request_codes()
         for r in rows:
             req = dict(r)
             
@@ -1248,7 +1277,7 @@ async def get_requests(page: Optional[int] = None, limit: Optional[int] = None, 
                         parsed_remarks = part.replace("Remarks:", "").strip()
 
             # Add virtual fields for frontend compatibility
-            req["request_code"] = f"REQ-{req['id'][:8].upper()}"
+            req["request_code"] = mapping.get(req["id"], f"REQ-{req['id'][:8].upper()}")
             req["approved_by"] = req["reviewed_by"]
             req["approved_by_name"] = req["approver_name"] or "Prof. Robert Chen"
             req["rejection_reason"] = req["reject_reason"] or ""
@@ -1335,6 +1364,31 @@ async def verify_receipt_public(requestCode: str):
     uuid_pattern = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
     is_uuid = bool(uuid_pattern.match(lookup_code))
 
+    is_numeric_seq = False
+    seq_index = -1
+    if is_short_code and len(lookup_code) != 8:
+        try:
+            seq_index = int(lookup_code) - 1
+            is_numeric_seq = True
+        except ValueError:
+            pass
+
+    if is_numeric_seq and seq_index >= 0:
+        seq_res = await db_query("SELECT id FROM requests ORDER BY requested_at ASC, id ASC LIMIT 1 OFFSET ?", [seq_index])
+        if seq_res:
+            lookup_code = seq_res[0]["id"]
+            is_uuid = True
+            is_short_code = False
+        else:
+            raise HTTPException(status_code=404, detail="Transaction receipt not found in official registry.")
+    elif is_short_code and not is_uuid:
+        # Check if it matches direct string (like test request ids e.g. req-1)
+        direct_res = await db_query("SELECT id FROM requests WHERE LOWER(id) = ?", [lookup_code.lower()])
+        if direct_res:
+            lookup_code = direct_res[0]["id"]
+            is_uuid = True
+            is_short_code = False
+
     sql = """
         SELECT r.id, r.student_id, r.component_id, r.quantity, r.status, r.notes, r.reject_reason, r.requested_at, r.reviewed_at, r.reviewed_by, r.returned_at,
                s.full_name as student_full_name, s.register_number as student_register_number, s.email as student_email, s.department as student_department,
@@ -1349,7 +1403,7 @@ async def verify_receipt_public(requestCode: str):
     if is_short_code and len(lookup_code) == 8:
         sql += " WHERE LOWER(r.id) LIKE ?"
         params = [f"{lookup_code.lower()}%"]
-    elif is_uuid:
+    elif is_uuid or (is_short_code and len(lookup_code) != 8):
         sql += " WHERE r.id = ?"
         params = [lookup_code]
     else:
@@ -1360,9 +1414,10 @@ async def verify_receipt_public(requestCode: str):
         raise HTTPException(status_code=404, detail="Transaction receipt not found in official registry.")
 
     row = rows[0]
+    mapping = await get_all_request_codes()
     return {
         "id": row["id"],
-        "request_code": f"REQ-{row['id'][:8].upper()}",
+        "request_code": mapping.get(row["id"], f"REQ-{row['id'][:8].upper()}"),
         "student_id": row["student_id"],
         "student_name": row.get("student_full_name") or "N/A",
         "student_register_no": row.get("student_register_number") or "N/A",
@@ -1412,7 +1467,9 @@ async def submit_request(data: dict = Body(...), user: dict = Depends(get_curren
         raise HTTPException(status_code=400, detail=f"Cannot submit request: insufficient stock (only {available_stock} available)")
 
     req_at = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
-    req_code = f"REQ-{req_id[:8].upper()}"
+    count_res = await db_query("SELECT COUNT(*) as count FROM requests")
+    count_val = count_res[0]["count"] if count_res else 0
+    req_code = f"REQ-{count_val + 1}"
     
     # Atomic Insert with NOT EXISTS to prevent duplicates
     insert_res = await db_query('''
@@ -1469,7 +1526,7 @@ async def approve_request(id: str, data: dict = Body(...), user: dict = Depends(
         raise HTTPException(status_code=400, detail="Cannot approve: stock depleted")
         
     app_at = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
-    req_code = f"REQ-{id[:8].upper()}"
+    req_code = await get_single_request_code(id, req["requested_at"])
     
     stmt1 = Statement(
         '''
@@ -1532,7 +1589,7 @@ async def reject_request(id: str, data: dict = Body(...), user: dict = Depends(r
         
     req = reqs[0]
     app_at = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
-    req_code = f"REQ-{id[:8].upper()}"
+    req_code = await get_single_request_code(id, req["requested_at"])
     
     stmt1 = Statement(
         '''
@@ -2124,6 +2181,7 @@ async def check_reminders(authorization: Optional[str] = Header(None)):
     # Send consolidated emails and log to database for idempotency
     from app.services.email_service import send_brevo_email
     sent_count = 0
+    mapping = await get_all_request_codes()
     
     for email, info in approaching.items():
         student_id = info["student_id"]
@@ -2144,7 +2202,7 @@ async def check_reminders(authorization: Optional[str] = Header(None)):
         # 2. Build email body table
         items_table_rows = ""
         for it in items:
-            req_code = f"REQ-{it['id'][:8].upper()}"
+            req_code = mapping.get(it['id'], f"REQ-{it['id'][:8].upper()}")
             comp_name = it['component_name']
             comp_sku = it.get('component_sku') or f"COMP-{it['component_id'][:4].upper()}"
             qty = it['quantity']
@@ -2460,9 +2518,10 @@ async def fetch_filtered_report_data(
 
     # Process requests
     requests = []
+    mapping = await get_all_request_codes()
     for r in requests_rows:
         req = dict(r)
-        req["request_code"] = f"REQ-{req['id'][:8].upper()}"
+        req["request_code"] = mapping.get(req["id"], f"REQ-{req['id'][:8].upper()}")
         requests.append(req)
 
     return components, requests
