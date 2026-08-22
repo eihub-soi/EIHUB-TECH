@@ -13,6 +13,7 @@ import {
   INITIAL_PURCHASE_ORDERS,
 } from "./mockData";
 import { apiRequest } from "../utils/api";
+import { generateStudentReceiptPdf } from "../utils/pdfGenerator";
 
 const STORAGE_KEYS = {
   COMPONENTS: "ei_hub_components_v2",
@@ -399,51 +400,36 @@ class MockEngine {
     }
 
     // Build PDF client-side and send base64 to backend for email attachment
-    import("../utils/pdfGenerator")
-      .then(async ({ generateStudentReceiptPdf }) => {
-        let pdfBase64 = "";
-        try {
-          const doc = await generateStudentReceiptPdf(req, false);
-          pdfBase64 = doc.output("datauristring").split(",")[1];
-        } catch (pdfErr) {
-          console.warn(
-            "[MockEngine] Failed to generate PDF for email attachment:",
-            pdfErr,
-          );
-        }
+    const processApproval = async () => {
+      let pdfBase64 = "";
+      try {
+        const doc = await generateStudentReceiptPdf(req, false);
+        pdfBase64 = doc.output("datauristring").split(",")[1];
+      } catch (pdfErr) {
+        console.warn(
+          "[MockEngine] Failed to generate PDF for email attachment:",
+          pdfErr,
+        );
+      }
 
-        apiRequest(`/api/requests/${requestId}/approve`, {
-          method: "POST",
-          body: JSON.stringify({
-            reviewed_by: facultyId,
-            notes: remark,
-            pdf_base64: pdfBase64,
-          }),
-        })
-          .then(() => this.syncWithD1())
-          .catch((err) =>
-            console.error(
-              "[MockEngine] Failed to approve request on backend:",
-              err,
-            ),
-          );
+      apiRequest(`/api/requests/${requestId}/approve`, {
+        method: "POST",
+        body: JSON.stringify({
+          reviewed_by: facultyId,
+          notes: remark,
+          pdf_base64: pdfBase64 || undefined,
+        }),
       })
-      .catch(() => {
-        apiRequest(`/api/requests/${requestId}/approve`, {
-          method: "POST",
-          body: JSON.stringify({
-            reviewed_by: facultyId,
-            notes: remark,
-          }),
-        })
-          .then(() => this.syncWithD1())
-          .catch((err) =>
-            console.error(
-              "[MockEngine] Failed to approve request on backend:",
-              err,
-            ),
-          );
-      });
+        .then(() => this.syncWithD1())
+        .catch((err) =>
+          console.error(
+            "[MockEngine] Failed to approve request on backend:",
+            err,
+          ),
+        );
+    };
+
+    processApproval();
 
     this.notify();
     return req;
