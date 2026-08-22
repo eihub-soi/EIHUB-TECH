@@ -70,7 +70,7 @@ export const ImportBillModal: React.FC<ImportBillModalProps> = ({ isOpen, onClos
     try {
       const token = localStorage.getItem("ei_hub_auth_token") || "";
       
-      const res = await fetch("http://localhost:8000/api/purchases/import/preview", {
+      const res = await fetch("/api/purchases/import/preview", {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${token}`
