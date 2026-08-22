@@ -1,5 +1,10 @@
 {
   "outputDirectory": "frontend/dist",
+  "functions": {
+    "api/index.py": {
+      "excludeFiles": "{frontend/**,node_modules/**,database/**,docker/**,.git/**,.wrangler/**,scripts/**,docs/**,scratch/**,test-results/**,.pytest_cache/**,*.db}"
+    }
+  },
   "rewrites": [
     {
       "source": "/api-brevo/:path*",
