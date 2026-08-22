@@ -1,6 +1,6 @@
 {
   "scripts": {
-    "build": "cd frontend && npm install && npm run build && rm -rf node_modules",
+    "build": "cd frontend && npm install && npm run build",
     "dev": "cd frontend && npm run dev"
   },
   "dependencies": {
