@@ -1,7 +1,6 @@
 import unittest
 import json
 import io
-import pandas as pd
 from unittest.mock import patch, AsyncMock
 from fastapi.testclient import TestClient
 import sys

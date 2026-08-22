@@ -30,8 +30,7 @@ def normalize_name(name: Optional[str]) -> str:
     return re.sub(r'[^a-z0-9]', '', cleaned)
 
 def clean_sku(val: Any) -> str:
-    import pandas as pd
-    if val is None or pd.isna(val):
+    if val is None or str(val).strip().lower() in ('nan', 'none', ''):
         return ""
     val_str = str(val).strip()
     if val_str.endswith(".0"):
@@ -39,9 +38,8 @@ def clean_sku(val: Any) -> str:
     return val_str
 
 def clean_currency(val: Any) -> float:
-    import pandas as pd
     import re
-    if val is None or pd.isna(val):
+    if val is None or str(val).strip().lower() in ('nan', 'none', ''):
         return 0.0
     if isinstance(val, (int, float)):
         return float(val)
@@ -55,12 +53,11 @@ def clean_currency(val: Any) -> float:
 @router.post("/components/analyze")
 async def analyze_components(file: UploadFile = File(...), user=Depends(require_faculty_or_admin)):
     """
-    Analyzes uploaded CSV/Excel file using Pandas.
+    Analyzes uploaded CSV/Excel file.
     Normalizes columns, cleans values, merges duplicates within the file, and runs initial validations.
     """
-    import pandas as pd
-    import numpy as np
     import re
+    from openpyxl import load_workbook
     
     try:
         content = await file.read()
@@ -68,27 +65,52 @@ async def analyze_components(file: UploadFile = File(...), user=Depends(require_
             raise HTTPException(status_code=413, detail="File too large. Maximum size is 5MB.")
         filename = (file.filename or "").lower()
         
+        rows_list = []
         if filename.endswith(".csv"):
-            df = pd.read_csv(io.BytesIO(content))
+            import csv
+            text_content = content.decode('utf-8', errors='ignore')
+            f_io = io.StringIO(text_content)
+            reader = csv.reader(f_io)
+            rows_list = list(reader)
         elif filename.endswith((".xlsx", ".xls")):
-            df = pd.read_excel(io.BytesIO(content))
+            wb = load_workbook(io.BytesIO(content), data_only=True)
+            ws = wb.active
+            for r in ws.iter_rows(values_only=True):
+                rows_list.append(list(r))
         else:
             raise HTTPException(status_code=400, detail="Unsupported file format. Please upload .csv, .xlsx, or .xls")
             
-        if df.empty:
+        if not rows_list:
             raise HTTPException(status_code=400, detail="The uploaded file is empty.")
             
-        if len(df) > 5000:
-            raise HTTPException(status_code=400, detail="The file contains too many rows. Maximum limit is 5000 rows.")
-            
-        # Clean column names
-        df.columns = df.columns.astype(str).str.strip()
+        # Extract headers and clean column names
+        header = [str(col).strip() if col is not None else "" for col in rows_list[0]]
         
-        # Clean string values (strip spaces)
-        for col in df.columns:
-            dtype_str = str(df[col].dtype).lower()
-            if "object" in dtype_str or "str" in dtype_str:
-                df[col] = df[col].astype(str).str.strip()
+        # Remove completely empty headers or handle empty file check
+        if all(h == "" for h in header):
+            raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+            
+        # Clean data rows (strip spaces) and skip completely empty rows
+        data_rows = []
+        for r in rows_list[1:]:
+            if all(val is None or str(val).strip() == "" for val in r):
+                continue
+            cleaned_row = []
+            for val in r:
+                if val is None:
+                    cleaned_row.append(None)
+                elif isinstance(val, str):
+                    cleaned_row.append(val.strip())
+                else:
+                    cleaned_row.append(val)
+            if len(cleaned_row) < len(header):
+                cleaned_row += [None] * (len(header) - len(cleaned_row))
+            else:
+                cleaned_row = cleaned_row[:len(header)]
+            data_rows.append(cleaned_row)
+            
+        if len(data_rows) > 5000:
+            raise HTTPException(status_code=400, detail="The file contains too many rows. Maximum limit is 5000 rows.")
             
         # Map columns to system fields
         column_mapping = {
@@ -106,7 +128,7 @@ async def analyze_components(file: UploadFile = File(...), user=Depends(require_
         detected_mapping = {}
         mapped_columns = {}
         
-        for col in df.columns:
+        for col_idx, col in enumerate(header):
             col_clean = re.sub(r'[\s_\-]+', ' ', col.lower().strip())
             matched_sys_field = None
             for k, val in column_mapping.items():
@@ -115,7 +137,7 @@ async def analyze_components(file: UploadFile = File(...), user=Depends(require_
                     matched_sys_field = val
                     break
             if matched_sys_field:
-                mapped_columns[col] = matched_sys_field
+                mapped_columns[col_idx] = matched_sys_field
                 detected_mapping[matched_sys_field] = col
                 
         system_field_labels = {
@@ -132,66 +154,81 @@ async def analyze_components(file: UploadFile = File(...), user=Depends(require_
         required_fields = ["category", "name", "total_stock"]
         missing_required = [system_field_labels[r] for r in required_fields if r not in detected_mapping]
         
-        # Rename columns to our normalized system field names
-        rename_dict = {orig: sys_f for orig, sys_f in mapped_columns.items()}
-        df.rename(columns=rename_dict, inplace=True)
-        
-        # Fill missing system fields with None/default
+        # Build dictionary for each row using expected system fields
         expected_cols = ["sku", "name", "category", "description", "features", "total_stock", "unit_cost", "location", "image_url"]
-        for col in expected_cols:
-            if col not in df.columns:
-                df[col] = None
-                
-        df = df.replace({np.nan: None})
-        
-        # Core data formatting
-        df['sku'] = df['sku'].apply(clean_sku)
-        
-        df['name'] = df['name'].fillna("").astype(str).str.strip().str.replace(r'\s+', ' ', regex=True).str.title()
-        df['name'] = df['name'].replace(["", "None", "Nan", "NaN"], None)
-        
-        df['category'] = df['category'].fillna("GENERAL").astype(str).str.strip().str.title()
-        df['category'] = df['category'].replace(["", "None", "Nan", "NaN"], "GENERAL")
-        
-        df['description'] = df['description'].fillna("").astype(str).str.strip()
-        df['features'] = df['features'].fillna("").astype(str).str.strip()
-        
-        df['unit_cost'] = df['unit_cost'].apply(clean_currency)
-        df['total_stock'] = pd.to_numeric(df['total_stock'], errors='coerce').fillna(0).astype(int)
-        
-        df['location'] = df['location'].fillna("").astype(str).str.strip()
-        df['image_url'] = df['image_url'].fillna("").astype(str).str.strip()
-        
-        # Merge Duplicates in file by SKU Code (preserve leading zeroes/string formatting)
-        df['_norm_sku'] = df['sku'].fillna("").astype(str).str.strip().str.lower()
-        valid_mask = df['sku'].notna() & (df['sku'] != '') & df['name'].notna() & (df['name'] != '')
-        df_valid = df[valid_mask]
-        df_invalid = df[~valid_mask]
-        
-        merged_duplicates_count = 0
-        if not df_valid.empty:
-            original_len = len(df_valid)
-            agg_dict = {
-                'sku': 'first',
-                'name': 'first',
-                'category': 'first',
-                'description': 'first',
-                'features': 'first',
-                'total_stock': 'sum',
-                'unit_cost': 'first',
-                'location': 'first',
-                'image_url': 'first',
-            }
-            df_valid_grouped = df_valid.groupby('_norm_sku').agg(agg_dict).reset_index(drop=True)
-            merged_duplicates_count = original_len - len(df_valid_grouped)
-        else:
-            df_valid_grouped = df_valid
+        row_dicts = []
+        for r_vals in data_rows:
+            row_dict = {f: None for f in expected_cols}
+            for col_idx, sys_f in mapped_columns.items():
+                row_dict[sys_f] = r_vals[col_idx]
+            row_dicts.append(row_dict)
             
-        df_cleaned = pd.concat([df_valid_grouped, df_invalid], ignore_index=True)
+        # Core data formatting
+        for row in row_dicts:
+            row['sku'] = clean_sku(row['sku'])
+            
+            name_val = row['name']
+            if name_val is None or str(name_val).strip() == "":
+                row['name'] = None
+            else:
+                name_str = re.sub(r'\s+', ' ', str(name_val).strip()).title()
+                if name_str in ("", "None", "Nan", "NaN"):
+                    row['name'] = None
+                else:
+                    row['name'] = name_str
+                    
+            cat_val = row['category']
+            if cat_val is None or str(cat_val).strip() == "":
+                row['category'] = "GENERAL"
+            else:
+                cat_str = str(cat_val).strip().title()
+                if cat_str in ("", "None", "Nan", "NaN"):
+                    row['category'] = "GENERAL"
+                else:
+                    row['category'] = cat_str
+                    
+            row['description'] = str(row['description'] or "").strip()
+            row['features'] = str(row['features'] or "").strip()
+            
+            row['unit_cost'] = clean_currency(row['unit_cost'])
+            
+            try:
+                stock_val = row['total_stock']
+                if stock_val is None or str(stock_val).strip() == "":
+                    row['total_stock'] = 0
+                else:
+                    row['total_stock'] = int(float(str(stock_val).strip()))
+            except Exception:
+                row['total_stock'] = 0
+                
+            row['location'] = str(row['location'] or "").strip()
+            row['image_url'] = str(row['image_url'] or "").strip()
+            
+        # Merge Duplicates in file by SKU Code (preserve leading zeroes/string formatting)
+        valid_rows = []
+        invalid_rows = []
+        for row in row_dicts:
+            sku_val = row['sku']
+            name_val = row['name']
+            if sku_val and name_val:
+                valid_rows.append(row)
+            else:
+                invalid_rows.append(row)
+                
+        grouped_valid = {}
+        for row in valid_rows:
+            norm_sku = row['sku'].strip().lower()
+            if norm_sku not in grouped_valid:
+                grouped_valid[norm_sku] = dict(row)
+            else:
+                grouped_valid[norm_sku]['total_stock'] += row['total_stock']
+                
+        df_valid_grouped_list = list(grouped_valid.values())
+        merged_duplicates_count = len(valid_rows) - len(df_valid_grouped_list)
+        df_cleaned_list = df_valid_grouped_list + invalid_rows
         
         validated_rows = []
-        for idx, row in df_cleaned.iterrows():
-            row_dict = row.to_dict()
+        for idx, row_dict in enumerate(df_cleaned_list):
             errors = []
             warnings = []
             status_val = "valid"
@@ -719,20 +756,13 @@ def get_preprocessed_images(img: Image.Image) -> Dict[str, Image.Image]:
     # Version D: Sharpened
     versions['version_d'] = img_gray.filter(ImageFilter.SHARPEN)
     
-    # Version C: Adaptive threshold (requires OpenCV)
+    # Version C: Grayscale + resize (2x) + binarization threshold (pure PIL, fallback-free)
     try:
-        import cv2
-        import numpy as np
-        cv_img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-        gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
-        gray_resized = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-        thresh = cv2.adaptiveThreshold(
-            gray_resized, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY, 31, 11
-        )
-        versions['version_c'] = Image.fromarray(thresh)
+        img_resized = img_gray.resize((img_gray.width * 2, img_gray.height * 2), Image.Resampling.LANCZOS)
+        thresh = img_resized.point(lambda p: 255 if p > 127 else 0)
+        versions['version_c'] = thresh
     except Exception as e:
-        print(f"[OCR Preprocessing] OpenCV adaptive threshold failed/skipped: {e}")
+        print(f"[OCR Preprocessing] PIL threshold binarization failed: {e}")
         
     return versions
 
