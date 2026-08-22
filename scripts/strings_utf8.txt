@@ -1,0 +1,86 @@
+﻿STRING: 'SELECT id, email, full_name, role FROM profiles WHERE id = ?'
+STRING: 'SELECT id, email, full_name, role FROM profiles WHERE firebase_uid = ?'
+STRING: "\n        INSERT INTO activity_logs (id, user_id, user_name, action, entity_type, entity_id, details, severity, ip_address, created_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))\n    "
+STRING: '/api/auth/reset-link'
+STRING: 'SELECT email FROM profiles WHERE email = ?'
+STRING: '/api/components'
+STRING: 'SELECT * FROM components ORDER BY created_at DESC'
+STRING: 'SELECT * FROM components ORDER BY created_at DESC LIMIT ? OFFSET ?'
+STRING: 'SELECT id FROM components WHERE LOWER(name) = ? LIMIT 1'
+STRING: "\n        INSERT INTO components (id, name, category, description, total_stock, available_stock, location, image_url, unit, created_at, updated_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))\n        "
+STRING: "\n        INSERT INTO activity_logs (id, user_id, user_name, action, entity_type, entity_id, details, severity, ip_address, created_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))\n        "
+STRING: '/api/components/{id}'
+STRING: "\n        UPDATE components\n        SET name = ?, category = ?, description = ?, total_stock = ?, available_stock = ?, location = ?, image_url = ?, updated_at = datetime('now')\n        WHERE id = ?\n        "
+STRING: "\n        INSERT INTO activity_logs (id, user_id, user_name, action, entity_type, entity_id, details, severity, ip_address, created_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))\n        "
+STRING: 'UPDATE_COMPONENT'
+STRING: 'SELECT name FROM components WHERE id = ?'
+STRING: "\n        INSERT INTO activity_logs (id, user_id, user_name, action, entity_type, entity_id, details, severity, ip_address, created_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))\n        "
+STRING: '/api/requests'
+STRING: '\n                SELECT r.*, \n                       s.full_name as student_name, s.register_number as student_register_no, s.email as student_email,\n                       a.full_name as approver_name,\n                       c.name as component_name, c.category as component_category, c.image_url as component_image\n                FROM requests r\n                LEFT JOIN profiles s ON r.student_id = s.id\n                LEFT JOIN profiles a ON r.reviewed_by = a.id\n                LEFT JOIN components c ON r.component_id = c.id\n                ORDER BY r.requested_at DESC\n            '
+STRING: '\n                SELECT r.*, \n                       s.full_name as student_name, s.register_number as student_register_no, s.email as student_email,\n                       a.full_name as approver_name,\n                       c.name as component_name, c.category as component_category, c.image_url as component_image\n                FROM requests r\n                LEFT JOIN profiles s ON r.student_id = s.id\n                LEFT JOIN profiles a ON r.reviewed_by = a.id\n                LEFT JOIN components c ON r.component_id = c.id\n                ORDER BY r.requested_at DESC\n                LIMIT ? OFFSET ?\n            '
+STRING: '/api/requests/submit'
+STRING: 'SELECT name, available_stock FROM components WHERE id = ?'
+STRING: "SELECT id FROM requests WHERE student_id = ? AND component_id = ? AND status = 'pending' LIMIT 1"
+STRING: "SELECT id, role FROM profiles WHERE role = 'faculty' OR role = 'admin'"
+STRING: 'SELECT email FROM profiles WHERE id = ?'
+STRING: "\n        INSERT INTO requests (id, student_id, component_id, quantity, status, notes, requested_at)\n        VALUES (?, ?, ?, ?, 'pending', ?, ?)\n        "
+STRING: "\n        INSERT INTO activity_logs (id, user_id, user_name, action, entity_type, entity_id, details, severity, ip_address, created_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))\n        "
+STRING: '/api/requests/{id}/approve'
+STRING: '\n        SELECT r.*, c.name as component_name, c.available_stock, s.email as student_email, s.full_name as student_name\n        FROM requests r\n        JOIN components c ON r.component_id = c.id\n        JOIN profiles s ON r.student_id = s.id\n        WHERE r.id = ?\n    '
+STRING: "\n        UPDATE requests \n        SET status = 'approved', reviewed_by = ?, reviewed_at = ?, reject_reason = ?\n        WHERE id = ? AND status = 'pending' AND (\n            SELECT available_stock FROM components WHERE id = requests.component_id\n        ) >= quantity\n        "
+STRING: "\n        UPDATE components \n        SET available_stock = available_stock - ?, updated_at = datetime('now') \n        WHERE id = ? AND EXISTS (\n            SELECT 1 FROM requests WHERE id = ? AND status = 'approved' AND reviewed_at = ?\n        )\n        "
+STRING: "\n        INSERT INTO activity_logs (id, user_id, user_name, action, entity_type, entity_id, details, severity, ip_address, created_at)\n        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')\n        WHERE EXISTS (\n            SELECT 1 FROM requests WHERE id = ? AND status = 'approved' AND reviewed_at = ?\n        )\n        "
+STRING: '/api/requests/{id}/reject'
+STRING: '\n        SELECT r.*, c.name as component_name, s.email as student_email, s.full_name as student_name\n        FROM requests r\n        JOIN components c ON r.component_id = c.id\n        JOIN profiles s ON r.student_id = s.id\n        WHERE r.id = ?\n    '
+STRING: "\n        UPDATE requests \n        SET status = 'rejected', reviewed_by = ?, reviewed_at = ?, reject_reason = ?\n        WHERE id = ? AND status = 'pending'\n        "
+STRING: "\n        INSERT INTO activity_logs (id, user_id, user_name, action, entity_type, entity_id, details, severity, ip_address, created_at)\n        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')\n        WHERE EXISTS (\n            SELECT 1 FROM requests WHERE id = ? AND status = 'rejected' AND reviewed_at = ?\n        )\n        "
+STRING: '/api/requests/{id}/return-request'
+STRING: '\n        SELECT r.quantity, r.status, c.name FROM requests r \n        JOIN components c ON r.component_id = c.id \n        WHERE r.id = ?\n    '
+STRING: "SELECT id FROM profiles WHERE role = 'faculty' OR role = 'admin'"
+STRING: "\n        UPDATE requests\n        SET return_requested_at = ?, reject_reason = ?\n        WHERE id = ? AND status != 'returned'\n        "
+STRING: "\n        INSERT INTO activity_logs (id, user_id, user_name, action, entity_type, entity_id, details, severity, ip_address, created_at)\n        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')\n        WHERE EXISTS (\n            SELECT 1 FROM requests WHERE id = ? AND return_requested_at = ?\n        )\n        "
+STRING: '/api/requests/{id}/return-process'
+STRING: '\n        SELECT r.*, c.name as component_name, c.total_stock, c.available_stock, s.email as student_email, s.full_name as student_name\n        FROM requests r\n        JOIN components c ON r.component_id = c.id\n        JOIN profiles s ON r.student_id = s.id\n        WHERE r.id = ?\n    '
+STRING: "\n        UPDATE requests\n        SET status = 'returned', returned_at = ?, return_reviewed_by = ?, reject_reason = ?\n        WHERE id = ? AND status != 'returned'\n        "
+STRING: "\n            UPDATE components\n            SET available_stock = MIN(total_stock, available_stock + ?), updated_at = datetime('now')\n            WHERE id = ? AND EXISTS (\n                SELECT 1 FROM requests WHERE id = ? AND status = 'returned' AND returned_at = ?\n            )\n            "
+STRING: "\n        INSERT INTO activity_logs (id, user_id, user_name, action, entity_type, entity_id, details, severity, ip_address, created_at)\n        SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now')\n        WHERE EXISTS (\n            SELECT 1 FROM requests WHERE id = ? AND status = 'returned' AND returned_at = ?\n        )\n        "
+STRING: 'SELECT id FROM profiles WHERE LOWER(username) = ? AND id != ?'
+STRING: '/api/profiles'
+STRING: 'SELECT * FROM profiles ORDER BY created_at DESC'
+STRING: '/api/profiles/sync'
+STRING: 'SELECT id FROM profiles WHERE id = ? OR email = ?'
+STRING: "\n            UPDATE profiles\n            SET firebase_uid = ?, full_name = ?, role = ?, department = ?, phone = ?, register_number = ?, avatar_url = ?, faculty_id = ?, roll_number = ?, institution = ?, password = COALESCE(?, password), year_of_study = COALESCE(?, year_of_study), username = ?, updated_at = datetime('now')\n            WHERE id = ?\n        "
+STRING: "\n            INSERT INTO profiles (id, firebase_uid, email, full_name, role, department, phone, register_number, avatar_url, created_at, updated_at, is_active, faculty_id, roll_number, institution, password, year_of_study, username)\n            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), 1, ?, ?, ?, ?, ?, ?)\n        "
+STRING: 'SELECT * FROM profiles WHERE id = ?'
+STRING: '/api/profiles/{id}'
+STRING: 'SELECT * FROM profiles WHERE id = ?'
+STRING: "\n        UPDATE profiles\n        SET full_name = ?, department = ?, phone = ?, register_number = ?, avatar_url = ?, is_active = ?, role = ?,\n            email = ?, faculty_id = ?, roll_number = ?, institution = ?, year_of_study = ?, username = ?, updated_at = datetime('now')\n        WHERE id = ?\n    "
+STRING: 'UPDATE _auth_users SET email = ? WHERE email = ?'
+STRING: 'UPDATE_PROFILE'
+STRING: 'SELECT email, firebase_uid FROM profiles WHERE id = ?'
+STRING: '/api/activity-logs'
+STRING: 'SELECT * FROM activity_logs ORDER BY created_at DESC LIMIT 100'
+STRING: '/api/notifications'
+STRING: '/api/notifications/{id}/read'
+STRING: '/api/notifications/read-all'
+STRING: '/api/purchase-orders'
+STRING: 'SELECT * FROM purchase_orders ORDER BY created_at DESC'
+STRING: 'SELECT id FROM purchase_orders WHERE invoice_ref = ? LIMIT 1'
+STRING: 'SELECT id, total_stock, available_stock FROM components WHERE id = ?'
+STRING: 'SELECT id, total_stock, available_stock FROM components WHERE LOWER(name) = ?'
+STRING: "\n        INSERT INTO purchase_orders (id, po_number, supplier_name, component_id, component_name, component_category, quantity, unit_cost, total_cost, purchased_by, purchased_by_name, invoice_ref, cabinet, shelf, status, purchased_at, created_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'delivered', datetime('now'), datetime('now'))\n        "
+STRING: "\n            UPDATE components \n            SET total_stock = ?, available_stock = ?, updated_at = datetime('now')\n            WHERE id = ?\n            "
+STRING: "\n            INSERT INTO components (id, name, category, description, total_stock, available_stock, location, image_url, unit, created_at, updated_at)\n            VALUES (?, ?, ?, ?, ?, ?, ?, 'https://images.unsplash.com/photo-1608564697071-ddf911d81370?w=400', 'pcs', datetime('now'), datetime('now'))\n            "
+STRING: "\n        INSERT INTO activity_logs (id, user_id, user_name, action, entity_type, entity_id, details, severity, ip_address, created_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))\n        "
+STRING: '/api/purchase-orders/{po_id}'
+STRING: 'SELECT * FROM purchase_orders WHERE id = ?'
+STRING: "\n        UPDATE purchase_orders\n        SET supplier_name = ?, quantity = ?, unit_cost = ?, total_cost = ?, invoice_ref = ?, cabinet = ?, shelf = ?, updated_at = datetime('now')\n        WHERE id = ?\n        "
+STRING: 'SELECT id, total_stock, available_stock FROM components WHERE id = ?'
+STRING: "\n                UPDATE components\n                SET total_stock = ?, available_stock = ?, updated_at = datetime('now')\n                WHERE id = ?\n                "
+STRING: 'SELECT * FROM purchase_orders WHERE id = ?'
+STRING: 'SELECT id, total_stock, available_stock FROM components WHERE id = ?'
+STRING: "\n                UPDATE components\n                SET total_stock = ?, available_stock = ?, updated_at = datetime('now')\n                WHERE id = ?\n                "
+STRING: '/api/cron/check-reminders'
+STRING: "\n        SELECT r.*, c.name as component_name, s.email as student_email, s.full_name as student_name\n        FROM requests r\n        JOIN components c ON r.component_id = c.id\n        JOIN profiles s ON r.student_id = s.id\n        WHERE r.status = 'approved' AND r.returned_at IS NULL\n    "
+STRING: "\n        SELECT entity_id \n        FROM activity_logs \n        WHERE action = 'SEND_REMINDER' \n          AND created_at LIKE ?\n    "
+STRING: '/api/query'

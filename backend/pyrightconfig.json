@@ -1,0 +1,12 @@
+{
+  "venvPath": "d:/EI HUB TECH/backend",
+  "venv": ".venv",
+  "pythonPath": "d:/EI HUB TECH/backend/.venv/Scripts/python.exe",
+  "include": [
+    "."
+  ],
+  "exclude": [
+    "**/__pycache__",
+    ".venv"
+  ]
+}

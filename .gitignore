@@ -1,0 +1,39 @@
+# Node dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Production build outputs
+dist/
+
+# Local env files (highly critical)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Firebase Service Account key files (highly critical)
+*firebase-adminsdk*.json
+firebase-service-account.json
+
+# Temp scratch scripts
+scratch/
+
+# IDE / System configs
+.DS_Store
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Agents configurations
+.agents/
+
+# Python cache
+__pycache__/
+*.pyc

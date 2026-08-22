@@ -1,0 +1,16 @@
+{
+  "rewrites": [
+    {
+      "source": "/api-brevo/:path*",
+      "destination": "https://api.brevo.com/:path*"
+    },
+    {
+      "source": "/api/:path*",
+      "destination": "/api/index.py"
+    },
+    {
+      "source": "/((?!api-brevo|api|assets|manifest.json|sw.js|logo.png|avatars|favicon.ico|robots.txt).*)",
+      "destination": "/index.html"
+    }
+  ]
+}

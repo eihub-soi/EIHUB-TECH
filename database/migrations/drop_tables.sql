@@ -1,0 +1,4 @@
+DROP TABLE IF EXISTS requests;
+DROP TABLE IF EXISTS purchase_orders;
+DROP TABLE IF EXISTS components;
+DROP TABLE IF EXISTS profiles;

@@ -1,0 +1,7 @@
+name = "ei-hub"
+compatibility_date = "2024-03-20"
+
+[[d1_databases]]
+binding = "DB" # i.e. available in your Worker on env.DB
+database_name = "ei-hub-db"
+database_id = "ecf93e46-708d-44ca-885f-ffc169f0fce5"
