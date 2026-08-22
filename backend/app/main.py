@@ -640,13 +640,19 @@ async def get_all_request_codes() -> Dict[str, str]:
             mapping[req_id] = f"REQ-{i+1}"
     return mapping
 
-async def get_single_request_code(req_id: str, requested_at: str) -> str:
+async def get_single_request_code(req_id: str, requested_at: Optional[str] = None) -> str:
     if req_id.startswith("req-"):
         try:
             val = int(req_id[4:])
             return f"REQ-{val}"
         except Exception:
             pass
+    if not requested_at:
+        res_req = await db_query("SELECT requested_at FROM requests WHERE id = ?", [req_id])
+        if res_req and res_req[0].get("requested_at"):
+            requested_at = res_req[0]["requested_at"]
+        else:
+            return f"REQ-{req_id[:8].upper()}"
     res = await db_query(
         "SELECT COUNT(*) as count FROM requests WHERE requested_at < ? OR (requested_at = ? AND id <= ?)",
         [requested_at, requested_at, req_id]
@@ -1526,7 +1532,7 @@ async def approve_request(id: str, data: dict = Body(...), user: dict = Depends(
         raise HTTPException(status_code=400, detail="Cannot approve: stock depleted")
         
     app_at = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
-    req_code = await get_single_request_code(id, req["requested_at"])
+    req_code = await get_single_request_code(id, req.get("requested_at"))
     
     stmt1 = Statement(
         '''
@@ -1589,7 +1595,7 @@ async def reject_request(id: str, data: dict = Body(...), user: dict = Depends(r
         
     req = reqs[0]
     app_at = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
-    req_code = await get_single_request_code(id, req["requested_at"])
+    req_code = await get_single_request_code(id, req.get("requested_at"))
     
     stmt1 = Statement(
         '''
