@@ -7,6 +7,7 @@
     "dev": "concurrently -n \"vite,fastapi\" -c \"blue,green\" \"vite\" \"cd ../backend && .venv\\Scripts\\python.exe -m uvicorn app.main:app --port 8000 --reload\"",
     "build": "tsc && vite build",
     "lint": "tsc --noEmit",
+    "test": "node src/test_email_validation.js",
     "preview": "vite preview"
   },
   "dependencies": {

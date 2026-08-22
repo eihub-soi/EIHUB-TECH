@@ -550,23 +550,24 @@ export const LoginPage: React.FC = () => {
                               setLoginError('');
                             }
                           }}
-                          onBlur={() => {
-                            const emailValidation = validateEmail(email);
+                          onBlur={(e) => {
+                            const val = e.target.value;
+                            const emailValidation = validateEmail(val);
                             if (!emailValidation.isValid) {
                               setLoginError(emailValidation.error);
                             } else {
                               setLoginError('');
                             }
                           }}
-                          onPaste={() => {
-                            setTimeout(() => {
-                              const emailValidation = validateEmail(email);
-                              if (!emailValidation.isValid) {
-                                setLoginError(emailValidation.error);
-                              } else {
-                                setLoginError('');
-                              }
-                            }, 0);
+                          onPaste={(e) => {
+                            const val = e.clipboardData.getData('text');
+                            setEmail(val);
+                            const emailValidation = validateEmail(val);
+                            if (!emailValidation.isValid) {
+                              setLoginError(emailValidation.error);
+                            } else {
+                              setLoginError('');
+                            }
                           }}
                           onKeyDown={(e) => {
                             if (e.key === 'Enter' && (isLoginEmailInvalid || !password)) {
@@ -711,23 +712,25 @@ export const LoginPage: React.FC = () => {
                             }
                             setGoogleError('');
                           }}
-                          onBlur={() => {
-                            const regEmailValidation = validateEmail(regEmail);
+                          onBlur={(e) => {
+                            const val = e.target.value;
+                            const regEmailValidation = validateEmail(val);
                             if (!regEmailValidation.isValid) {
                               setRegEmailError(regEmailValidation.error);
                             } else {
                               setRegEmailError('');
                             }
                           }}
-                          onPaste={() => {
-                            setTimeout(() => {
-                              const regEmailValidation = validateEmail(regEmail);
-                              if (!regEmailValidation.isValid) {
-                                setRegEmailError(regEmailValidation.error);
-                              } else {
-                                setRegEmailError('');
-                              }
-                            }, 0);
+                          onPaste={(e) => {
+                            const val = e.clipboardData.getData('text');
+                            setRegEmail(val);
+                            setRegUsername(val);
+                            const regEmailValidation = validateEmail(val);
+                            if (!regEmailValidation.isValid) {
+                              setRegEmailError(regEmailValidation.error);
+                            } else {
+                              setRegEmailError('');
+                            }
                           }}
                           onKeyDown={(e) => {
                             if (e.key === 'Enter' && isRegFormInvalid) {

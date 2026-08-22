@@ -85,8 +85,10 @@ async def analyze_components(file: UploadFile = File(...), user=Depends(require_
         df.columns = df.columns.astype(str).str.strip()
         
         # Clean string values (strip spaces)
-        for col in df.select_dtypes(include="object").columns:
-            df[col] = df[col].astype(str).str.strip()
+        for col in df.columns:
+            dtype_str = str(df[col].dtype).lower()
+            if "object" in dtype_str or "str" in dtype_str:
+                df[col] = df[col].astype(str).str.strip()
             
         # Map columns to system fields
         column_mapping = {

@@ -476,7 +476,7 @@ async def strict_email_validation_middleware(request: Request, call_next):
         if "email" in k.lower() and v:
             if any(c.isupper() for c in v):
                 return Response(
-                    content=json.dumps({"detail": "invalid emailid/password"}),
+                    content=json.dumps({"error": "Email address must contain only lowercase letters."}),
                     status_code=400,
                     media_type="application/json"
                 )
@@ -505,7 +505,7 @@ async def strict_email_validation_middleware(request: Request, call_next):
 
                 if has_uppercase_email(body_json):
                     return Response(
-                        content=json.dumps({"detail": "invalid emailid/password"}),
+                        content=json.dumps({"error": "Email address must contain only lowercase letters."}),
                         status_code=400,
                         media_type="application/json"
                     )

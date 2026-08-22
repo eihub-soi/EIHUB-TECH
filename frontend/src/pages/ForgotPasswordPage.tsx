@@ -170,8 +170,9 @@ export const ForgotPasswordPage: React.FC = () => {
                       setEmailError("");
                     }
                   }}
-                  onBlur={() => {
-                    const emailValidation = validateEmail(email);
+                  onBlur={(e) => {
+                    const val = e.target.value;
+                    const emailValidation = validateEmail(val);
                     if (!emailValidation.isValid) {
                       setEmailError(emailValidation.error);
                     } else {
@@ -179,14 +180,14 @@ export const ForgotPasswordPage: React.FC = () => {
                     }
                   }}
                   onPaste={(e) => {
-                    setTimeout(() => {
-                      const emailValidation = validateEmail(email);
-                      if (!emailValidation.isValid) {
-                        setEmailError(emailValidation.error);
-                      } else {
-                        setEmailError("");
-                      }
-                    }, 0);
+                    const val = e.clipboardData.getData('text');
+                    setEmail(val);
+                    const emailValidation = validateEmail(val);
+                    if (!emailValidation.isValid) {
+                      setEmailError(emailValidation.error);
+                    } else {
+                      setEmailError("");
+                    }
                   }}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && isEmailInvalid) {

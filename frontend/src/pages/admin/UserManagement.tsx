@@ -722,6 +722,25 @@ export const UserManagement: React.FC = () => {
                       setEmailError("");
                     }
                   }}
+                  onBlur={(e) => {
+                    const val = e.target.value;
+                    const emailValidation = validateEmail(val);
+                    if (!emailValidation.isValid) {
+                      setEmailError(emailValidation.error);
+                    } else {
+                      setEmailError("");
+                    }
+                  }}
+                  onPaste={(e) => {
+                    const val = e.clipboardData.getData('text');
+                    setFormData({ ...formData, email: val });
+                    const emailValidation = validateEmail(val);
+                    if (!emailValidation.isValid) {
+                      setEmailError(emailValidation.error);
+                    } else {
+                      setEmailError("");
+                    }
+                  }}
                   placeholder="user@kgkite.ac.in"
                   className="w-full px-3 py-2 rounded-xl glass-input text-black"
                   required

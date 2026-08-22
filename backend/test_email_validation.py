@@ -83,6 +83,12 @@ def test_email_validation():
         ("user@KGKITE.AC.IN", False),
         ("UsEr@kgkite.ac.in", False),
         ("student@kgkite.ac.in", True),
+        ("student@kgkite.ac.IN", False),
+        ("STUDENT@kgkite.ac.in", False),
+        ("STUDENT@KGKITE.AC.IN", False),
+        ("stUdent@kgkite.ac.in", False),
+        ("student.name@kgkite.ac.in", True),
+        ("student.Name@kgkite.ac.in", False),
     ]
 
     for email, expected_accepted in cases:
