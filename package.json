@@ -3,9 +3,8 @@
     "build": "cd frontend && npm install && npm run build",
     "dev": "cd frontend && npm run dev"
   },
-  "dependencies": {
-    "request": "^2.88.2"
-  },
+  "dependencies": {},
+
   "devDependencies": {
     "@playwright/test": "^1.62.1",
     "playwright": "^1.62.1"

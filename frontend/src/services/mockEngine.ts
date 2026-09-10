@@ -122,7 +122,24 @@ class MockEngine {
     return this.syncPromise;
   }
 
+  public isMockEnabled(): boolean {
+    if (import.meta.env.PROD || import.meta.env.MODE === "production") {
+      return import.meta.env.VITE_ENABLE_MOCK_ENGINE === "true";
+    }
+    return import.meta.env.VITE_ENABLE_MOCK_ENGINE === "true";
+  }
+
   private initStorage() {
+    if (!this.isMockEnabled()) {
+      localStorage.removeItem(STORAGE_KEYS.COMPONENTS);
+      localStorage.removeItem(STORAGE_KEYS.PROFILES);
+      localStorage.removeItem(STORAGE_KEYS.REQUESTS);
+      localStorage.removeItem(STORAGE_KEYS.LOGS);
+      localStorage.removeItem(STORAGE_KEYS.NOTIFS);
+      localStorage.removeItem(STORAGE_KEYS.PURCHASES);
+      localStorage.removeItem("ei_hub_mock_credentials");
+      return;
+    }
     if (!localStorage.getItem(STORAGE_KEYS.COMPONENTS)) {
       localStorage.setItem(
         STORAGE_KEYS.COMPONENTS,
@@ -169,7 +186,7 @@ class MockEngine {
   // --- COMPONENTS ---
   public getComponents(): ComponentItem[] {
     const data = localStorage.getItem(STORAGE_KEYS.COMPONENTS);
-    const comps: ComponentItem[] = data ? JSON.parse(data) : INITIAL_COMPONENTS;
+    const comps: ComponentItem[] = data ? JSON.parse(data) : (this.isMockEnabled() ? INITIAL_COMPONENTS : []);
 
     // Dynamically retrieve borrow requests to compute active loan quantities
     const requests = this.getRequests();
@@ -306,7 +323,7 @@ class MockEngine {
   // --- BORROW REQUESTS ---
   public getRequests(): BorrowRequest[] {
     const data = localStorage.getItem(STORAGE_KEYS.REQUESTS);
-    return data ? JSON.parse(data) : INITIAL_REQUESTS;
+    return data ? JSON.parse(data) : (this.isMockEnabled() ? INITIAL_REQUESTS : []);
   }
 
   public submitBorrowRequest(
@@ -562,7 +579,7 @@ class MockEngine {
   // --- PROFILES ---
   public getProfiles(): Profile[] {
     const data = localStorage.getItem(STORAGE_KEYS.PROFILES);
-    return data ? JSON.parse(data) : INITIAL_PROFILES;
+    return data ? JSON.parse(data) : (this.isMockEnabled() ? INITIAL_PROFILES : []);
   }
 
   public addProfile(

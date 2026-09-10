@@ -1,0 +1,154 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // -------------------------------------------------------------------------
+    // HELPER FUNCTIONS
+    // -------------------------------------------------------------------------
+
+    // Returns true if the user is authenticated via Firebase Auth
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Returns true if the user email ends with an official institutional domain
+    function isOfficialDomain() {
+      return isAuthenticated() &&
+        (request.auth.token.email.endsWith("@kgkite.ac.in") || request.auth.token.email.endsWith("@kgisl.com"));
+    }
+
+    // Retrieves user profile document from Firestore
+    function getUserData() {
+      return get(/databases/$(database)/documents/profiles/$(request.auth.uid)).data;
+    }
+
+    // Role verification functions (checks Auth custom claims first, falls back to profile doc)
+    function isAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.role == "admin" ||
+        request.auth.token.role == "super_admin" ||
+        (exists(/databases/$(database)/documents/profiles/$(request.auth.uid)) &&
+          (getUserData().role == "admin" || getUserData().role == "super_admin"))
+      );
+    }
+
+    function isFacultyOrAdmin() {
+      return isAuthenticated() && (
+        isAdmin() ||
+        request.auth.token.role == "faculty" ||
+        (exists(/databases/$(database)/documents/profiles/$(request.auth.uid)) &&
+          getUserData().role == "faculty")
+      );
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && (request.auth.uid == userId || request.auth.token.email == userId);
+    }
+
+    // -------------------------------------------------------------------------
+    // PROFILES COLLECTION
+    // -------------------------------------------------------------------------
+    match /profiles/{profileId} {
+      // Users can read their own profile; Faculty/Admin can read any profile
+      allow read: if isAuthenticated() && (
+        isOwner(profileId) ||
+        resource.data.id == request.auth.uid ||
+        resource.data.firebase_uid == request.auth.uid ||
+        isFacultyOrAdmin()
+      );
+
+      // New users can create their initial profile document
+      allow create: if isAuthenticated() && (
+        request.resource.data.firebase_uid == request.auth.uid ||
+        request.resource.data.id == request.auth.uid ||
+        isAdmin()
+      );
+
+      // Users can update non-privileged fields on their own profile; Admins can update anything
+      allow update: if isAuthenticated() && (
+        isAdmin() || (
+          isOwner(profileId) &&
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['role', 'is_active'])
+        )
+      );
+
+      // Deletion is restricted to Admins only
+      allow delete: if isAdmin();
+    }
+
+    // -------------------------------------------------------------------------
+    // COMPONENTS INVENTORY COLLECTION
+    // -------------------------------------------------------------------------
+    match /components/{componentId} {
+      // Inventory components are visible to all authenticated users
+      allow read: if isAuthenticated();
+
+      // Only Faculty and Administrators can add, modify, or adjust component inventory
+      allow create, update, delete: if isFacultyOrAdmin();
+    }
+
+    // -------------------------------------------------------------------------
+    // BORROW REQUESTS COLLECTION
+    // -------------------------------------------------------------------------
+    match /requests/{requestId} {
+      // Students can read their own requests; Faculty/Admin can read all requests
+      allow read: if isAuthenticated() && (
+        resource.data.student_id == request.auth.uid ||
+        resource.data.student_email == request.auth.token.email ||
+        isFacultyOrAdmin()
+      );
+
+      // Students can create requests for themselves with status 'pending'
+      allow create: if isAuthenticated() && (
+        request.resource.data.student_id == request.auth.uid &&
+        request.resource.data.status == "pending"
+      );
+
+      // Faculty/Admin can approve/reject/process returns; Students can initiate return request
+      allow update: if isAuthenticated() && (
+        isFacultyOrAdmin() || (
+          resource.data.student_id == request.auth.uid &&
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['return_requested_at', 'notes', 'updated_at'])
+        )
+      );
+
+      // Deletion restricted to Admins
+      allow delete: if isAdmin();
+    }
+
+    // -------------------------------------------------------------------------
+    // PURCHASE ORDERS & OCR PROCUREMENT COLLECTION
+    // -------------------------------------------------------------------------
+    match /purchase_orders/{poId} {
+      // Access to procurement purchase orders is restricted to Administrators & Faculty
+      allow read, write: if isFacultyOrAdmin();
+    }
+
+    // -------------------------------------------------------------------------
+    // NOTIFICATIONS COLLECTION
+    // -------------------------------------------------------------------------
+    match /notifications/{notificationId} {
+      // Users can read and update (e.g. mark as read) their own notifications
+      allow read, update: if isAuthenticated() && (
+        resource.data.user_id == request.auth.uid ||
+        resource.data.user_id == request.auth.token.email
+      );
+
+      // System or Admins can create notifications
+      allow create: if isAuthenticated();
+      allow delete: if isAdmin();
+    }
+
+    // -------------------------------------------------------------------------
+    // SYSTEM ACTIVITY / AUDIT LOGS
+    // -------------------------------------------------------------------------
+    match /activity_logs/{logId} {
+      // Audit logs can be read by Faculty and Administrators
+      allow read: if isFacultyOrAdmin();
+      // Authenticated users can append audit entries for their own actions
+      allow create: if isAuthenticated();
+      allow update, delete: if false; // Audit logs are immutable once created
+    }
+
+  }
+}

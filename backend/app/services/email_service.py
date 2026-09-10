@@ -1,5 +1,6 @@
 import os
 import httpx
+import asyncio
 from typing import Optional, List
 
 async def send_brevo_email(to_email: str, subject: str, html_content: str, attachment: Optional[list] = None) -> bool:
@@ -27,18 +28,25 @@ async def send_brevo_email(to_email: str, subject: str, html_content: str, attac
         "api-key": api_key
     }
     
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as http_client:
-            response = await http_client.post("https://api.brevo.com/v3/smtp/email", json=payload, headers=headers)
-            if response.status_code in [200, 201, 202]:
-                print(f"Brevo email successfully sent to {to_email}")
-                return True
-            else:
-                print(f"Brevo API error: {response.status_code} {response.text}")
-                return False
-    except Exception as e:
-        print(f"Failed to send email: {e}")
-        return False
+    max_retries = 3
+    delay = 1.0
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as http_client:
+                response = await http_client.post("https://api.brevo.com/v3/smtp/email", json=payload, headers=headers)
+                if response.status_code in [200, 201, 202]:
+                    print(f"Brevo email successfully sent to {to_email}")
+                    return True
+                else:
+                    print(f"Brevo API error (Attempt {attempt + 1}): {response.status_code} {response.text}")
+        except Exception as e:
+            print(f"Failed to send email (Attempt {attempt + 1}): {e}")
+        
+        if attempt < max_retries - 1:
+            await asyncio.sleep(delay)
+            delay *= 2.0
+
+    return False
 
 async def send_brevo_email_advanced(to_emails: List[str], subject: str, html_content: str, cc_emails: Optional[List[str]] = None, bcc_emails: Optional[List[str]] = None, attachment: Optional[list] = None) -> bool:
     api_key = os.environ.get("BREVO_API_KEY") or os.environ.get("VITE_BREVO_API_KEY")
@@ -69,15 +77,23 @@ async def send_brevo_email_advanced(to_emails: List[str], subject: str, html_con
         "api-key": api_key
     }
     
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as http_client:
-            response = await http_client.post("https://api.brevo.com/v3/smtp/email", json=payload, headers=headers)
-            if response.status_code in [200, 201, 202]:
-                print(f"Brevo advanced email successfully sent to {to_emails}")
-                return True
-            else:
-                print(f"Brevo API error: {response.status_code} {response.text}")
-                return False
-    except Exception as e:
-        print(f"Failed to send advanced email: {e}")
-        return False
+    max_retries = 3
+    delay = 1.0
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as http_client:
+                response = await http_client.post("https://api.brevo.com/v3/smtp/email", json=payload, headers=headers)
+                if response.status_code in [200, 201, 202]:
+                    print(f"Brevo advanced email successfully sent to {to_emails}")
+                    return True
+                else:
+                    print(f"Brevo API error (Attempt {attempt + 1}): {response.status_code} {response.text}")
+        except Exception as e:
+            print(f"Failed to send advanced email (Attempt {attempt + 1}): {e}")
+        
+        if attempt < max_retries - 1:
+            await asyncio.sleep(delay)
+            delay *= 2.0
+
+    return False
+

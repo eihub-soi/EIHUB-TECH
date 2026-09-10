@@ -297,7 +297,7 @@ export const LandingPage: React.FC = () => {
             Architected for Enterprise Laboratory Operations
           </h2>
           <p className="text-sm text-gray-700">
-            Powered by PostgreSQL RPC concurrency locking, D1 Row Level
+            Powered by Cloudflare D1 atomic row locking, D1 Row Level
             Security, and Framer Motion micro-interactions.
           </p>
         </div>
@@ -321,13 +321,14 @@ export const LandingPage: React.FC = () => {
               <ShieldCheck className="w-6 h-6" />
             </div>
             <h3 className="text-lg font-bold text-black">
-              PostgreSQL RPC Concurrency
+              Cloudflare D1 Atomic Guarding
             </h3>
             <p className="text-xs text-gray-700 leading-relaxed">
-              Atomic row locking (`FOR UPDATE`) prevents stock drift and race
+              Atomic SQL constraints prevent stock drift and race
               conditions during simultaneous student requests.
             </p>
           </div>
+
 
           <div className="p-6 rounded-3xl glass-card-hover glass-card space-y-4">
             <div className="w-12 h-12 rounded-2xl bg-gold-500/20 text-amber-900 flex items-center justify-center border border-gold-500/30">

@@ -105,11 +105,12 @@ export const SystemSettings: React.FC = () => {
               </span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-gray-700">PostgreSQL RPC Locking:</span>
+              <span className="text-gray-700">Cloudflare D1 Atomic Locking:</span>
               <span className="font-bold text-indigo-900">
-                ACTIVE (FOR UPDATE Isolation)
+                ACTIVE (Constraint Isolation)
               </span>
             </div>
+
           </div>
         </div>
 

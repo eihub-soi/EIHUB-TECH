@@ -1126,7 +1126,7 @@ async def evaluate_line_item(item: Dict[str, Any], comp_map: Dict[str, Dict[str,
     else:
         # Case insensitive/whitespace level matching
         for db_norm, db_c in comp_map.items():
-            if db_c["name"].lower().strip() == name.lower().strip():
+            if db_c.get("name") and db_c["name"].lower().strip() == name.lower().strip():
                 matched_db_comp = db_c
                 status = "✓ VERIFIED EXISTING"
                 break
@@ -1225,12 +1225,16 @@ def perform_ocr_sync(content: bytes, is_pdf: bool) -> Dict[str, Any]:
             
     # Step 2: Convert to Images & apply Multi-pass Image OCR
     tess_available = is_tesseract_available()
-    if not tess_available:
-        print("WARNING: Tesseract OCR is not installed/configured. Falling back to Mock Coordinate analysis.")
+    cloud_ocr_key = os.environ.get("GOOGLE_VISION_API_KEY") or os.environ.get("OCR_API_KEY")
+    
+    if not tess_available and not cloud_ocr_key:
+        print("[OCR Warning] Neither Tesseract nor Cloud Vision API key is configured. Utilizing structured fallback for manual entry.")
         raw_data = get_mock_image_to_data()
         parsed = parse_ocr_coordinates(raw_data)
-        parsed['raw_text'] = "\n".join(parsed['all_row_texts'])
+        parsed['raw_text'] = "\n".join(parsed.get('all_row_texts', []))
+        parsed['ocr_note'] = "PRODUCTION OCR CREDENTIALS REQUIRED. Manual entry fallback active."
         return parsed
+
         
     pages = []
     if is_pdf:
@@ -1334,10 +1338,10 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
     Ingests PDF/Image files, processes coordinate coordinates, filters line items,
     runs database matching classifications, and extracts metadata.
     """
-    if user.get("role") in ["faculty", "admin"]:
+    if user.get("role") not in ["admin", "super_admin"]:
         raise HTTPException(
             status_code=403,
-            detail="Access Denied: The Purchase Bills feature is not available for Faculty and Admin."
+            detail="Access Denied: The Purchase Bills feature is available for Administrators only."
         )
     content = await file.read()
     if len(content) > 5 * 1024 * 1024:

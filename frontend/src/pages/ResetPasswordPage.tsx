@@ -287,20 +287,11 @@ export const ResetPasswordPage: React.FC = () => {
         }
       }
 
-      // Update local mock credentials cache
-      if (email) {
-        try {
-          const credentials = JSON.parse(
-            localStorage.getItem("ei_hub_mock_credentials") || "{}",
-          );
-          credentials[email] = newPassword;
-          localStorage.setItem(
-            "ei_hub_mock_credentials",
-            JSON.stringify(credentials),
-          );
-        } catch (e) {
-          console.error("Error updating local mock credentials:", e);
-        }
+      // Ensure legacy mock credentials cache is purged
+      try {
+        localStorage.removeItem("ei_hub_mock_credentials");
+      } catch (e) {
+        // ignore
       }
 
       setSuccessMessage(

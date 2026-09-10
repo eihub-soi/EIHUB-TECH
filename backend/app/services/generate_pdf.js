@@ -986,7 +986,7 @@ doc.setFont("helvetica", "italic");
 doc.setFontSize(7);
 doc.setTextColor(100, 116, 139);
 doc.text(
-  "This is a system-generated comprehensive inventory and audit trail document of EI HUB Enterprise. All transactions logged in this report are cryptographically verified,\nimmutable, and synchronized with the secure Layerbase database.",
+  "This is a system-generated comprehensive inventory and audit trail document of EI HUB Enterprise. All transactions logged in this report are cryptographically verified,\nimmutable, and synchronized with the secure Cloudflare D1 Database.",
   14,
   128
 );

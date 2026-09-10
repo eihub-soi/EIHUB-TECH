@@ -69,7 +69,13 @@ def run_node_pdf_generator(
         env=env
     )
     
-    stdout, stderr = proc.communicate(input=json.dumps(payload).encode('utf-8'))
+    try:
+        stdout, stderr = proc.communicate(input=json.dumps(payload).encode('utf-8'), timeout=15)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
+        print("[PDF Gen Error] Node.js PDF generator timed out after 15s")
+        raise Exception("PDF Generator timed out after 15 seconds")
     
     if proc.returncode != 0:
         err_msg = stderr.decode('utf-8', errors='ignore')
@@ -77,6 +83,7 @@ def run_node_pdf_generator(
         raise Exception(f"PDF Generator failed: {err_msg}")
         
     return stdout
+
 
 def generate_inventory_report_pdf(
     components: List[Dict[str, Any]], 

@@ -82,7 +82,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     let attempt = 0;
     while (attempt < maxRetries) {
       try {
-        return await apiRequest("/api/profiles", { signal });
+        return await apiRequest("/api/profiles", { signal, timeout: 5000 });
       } catch (err: any) {
         if (err.name === 'AbortError' || signal.aborted) {
           throw err;
@@ -338,7 +338,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         if (userCredential.user) {
           let profile = null;
           try {
-            profile = await apiRequest("/api/profiles");
+            profile = await apiRequest("/api/profiles", { timeout: 5000 });
           } catch (err) {
             console.warn(
               "[AuthContext] Failed to query profile from FastAPI backend during login:",
@@ -378,6 +378,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
             try {
               profile = await apiRequest("/api/profiles/sync", {
+                timeout: 5000,
                 method: "POST",
                 body: JSON.stringify({
                   id: newId,
@@ -391,7 +392,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
                     newRole === "student"
                       ? `7117${Math.floor(21100000 + Math.random() * 900000)}`
                       : null,
-                  password: password,
                   username: userCredential.user.email || email,
                 }),
               });
@@ -402,7 +402,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
               );
             }
 
-            if (!profile) {
+            if (!profile && mockEngine.isMockEnabled()) {
               const localProfiles = mockEngine.getProfiles();
               const newLocalProfile = {
                 id: newId,
@@ -422,10 +422,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
                 username: userCredential.user.email || email,
               } as Profile;
               localProfiles.push(newLocalProfile);
-              localStorage.setItem(
-                "ei_hub_profiles_v2",
-                JSON.stringify(localProfiles),
-              );
               profile = newLocalProfile;
             }
           }
@@ -579,7 +575,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       // Retrieve the profile from FastAPI / Fallback
       let profile = null;
       try {
-        profile = await apiRequest("/api/profiles");
+        profile = await apiRequest("/api/profiles", { timeout: 5000 });
       } catch (err) {
         console.warn(
           "[AuthContext] Failed to query profile from FastAPI backend during Google sign-in:",
@@ -639,6 +635,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         // 2. Sync Google profile with FastAPI backend
         try {
           profile = await apiRequest("/api/profiles/sync", {
+            timeout: 5000,
             method: "POST",
             body: JSON.stringify({
               id: newProfileId,

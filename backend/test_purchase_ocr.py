@@ -293,15 +293,14 @@ class TestPurchaseOCR(unittest.TestCase):
         self.assertEqual(eval3["status"], "✓ VERIFIED NEW")
         self.assertIsNone(eval3["possible_match"])
 
-    def test_purchase_ocr_access_denied_for_admin_and_faculty(self):
-        # Temporarily mock user as admin role
+    def test_purchase_ocr_access_control(self):
+        # Admin is permitted to run purchase OCR
         self.mock_user["role"] = "admin"
         file = {"file": ("invoice.png", io.BytesIO(b"dummy image data"), "image/png")}
         response = self.client.post("/api/imports/purchase/ocr", files=file)
-        self.assertEqual(response.status_code, 403)
-        self.assertIn("Access Denied", response.json()["detail"])
+        self.assertEqual(response.status_code, 200)
         
-        # Verify endpoint denies faculty
+        # Non-admin (faculty/student) is denied
         self.mock_user["role"] = "faculty"
         response = self.client.post("/api/imports/purchase/ocr", files=file)
         self.assertEqual(response.status_code, 403)

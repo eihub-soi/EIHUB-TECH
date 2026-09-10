@@ -321,5 +321,22 @@ class TestSecurityHardening(unittest.TestCase):
         self.assertEqual(response.status_code, 413)
         self.assertIn("File too large", response.json()["detail"])
 
+    @patch("app.main.httpx.AsyncClient.post")
+    def test_upstash_redis_rate_limiting(self, mock_post):
+        # Mock Upstash Redis REST API pipeline returning rate limit exceeded (res_data count = 999 > limit 10)
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = [{"result": 999}, {"result": "OK"}]
+        mock_post.return_value = mock_resp
+
+        with patch.dict(os.environ, {
+            "UPSTASH_REDIS_REST_URL": "https://fake-redis.upstash.io",
+            "UPSTASH_REDIS_REST_TOKEN": "faketoken"
+        }):
+            response = self.client.post("/api/auth/reset-link", json={"email": "student@kgkite.ac.in"})
+            self.assertEqual(response.status_code, 429)
+            self.assertIn("Retry-After", response.headers)
+
 if __name__ == "__main__":
     unittest.main()
+

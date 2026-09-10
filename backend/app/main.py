@@ -26,7 +26,7 @@ from dotenv import load_dotenv
 
 from contextlib import asynccontextmanager
 import firebase_admin
-from firebase_admin import credentials, auth as firebase_auth, firestore
+from firebase_admin import credentials, auth as firebase_auth
 from cryptography.x509 import load_pem_x509_certificate
 
 # Cache for parsed Google Public Key objects to avoid RSA decoding overhead on every request
@@ -105,7 +105,6 @@ async def cleanup_rate_limits():
         try:
             await asyncio.sleep(120)  # Prune every 2 minutes
             now = time.time()
-            # Copy keys list to avoid ConcurrentModificationError / RuntimeError: dictionary keys changed during iteration
             ips = list(RATE_LIMIT_REQUESTS.keys())
             for ip in ips:
                 ts = RATE_LIMIT_REQUESTS.get(ip, [])
@@ -114,10 +113,10 @@ async def cleanup_rate_limits():
                     RATE_LIMIT_REQUESTS.pop(ip, None)
                 else:
                     RATE_LIMIT_REQUESTS[ip] = valid_ts
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, RuntimeError):
             break
-        except Exception as e:
-            print(f"[RateLimit Cleanup] Error: {e}")
+        except Exception:
+            break
 
 # Asynchronous Background Email Queue & Workers
 EMAIL_QUEUE = asyncio.Queue()
@@ -132,11 +131,49 @@ async def email_worker():
                 print(f"[Email Worker] Failed to send email to {to_email}: {e}")
             finally:
                 EMAIL_QUEUE.task_done()
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, RuntimeError):
             break
         except Exception as e:
             print(f"[Email Worker] Loop error: {e}")
-            await asyncio.sleep(1)
+            try:
+                await asyncio.sleep(1)
+            except (asyncio.CancelledError, RuntimeError):
+                break
+
+# Distributed Upstash Redis Rate Limiting Helper
+async def check_redis_rate_limit(key: str, limit: int, window: int) -> Optional[bool]:
+    """
+    Checks rate limit using Upstash Redis REST API.
+    Returns True if ALLOWED, False if EXCEEDED, or None if Redis is not configured/unreachable.
+    """
+    upstash_url = os.environ.get("UPSTASH_REDIS_REST_URL")
+    upstash_token = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+    
+    if upstash_url and upstash_token:
+        try:
+            redis_key = f"rate:{key}"
+            headers = {"Authorization": f"Bearer {upstash_token}"}
+            async with httpx.AsyncClient(timeout=3.0) as http_c:
+                resp = await http_c.post(
+                    f"{upstash_url.rstrip('/')}/pipeline",
+                    headers=headers,
+                    json=[
+                        ["INCR", redis_key],
+                        ["EXPIRE", redis_key, window]
+                    ]
+                )
+                if resp.status_code == 200:
+                    res_data = resp.json()
+                    if isinstance(res_data, list) and len(res_data) > 0:
+                        current_count = res_data[0].get("result", 1)
+                        if isinstance(current_count, int) and current_count > limit:
+                            return False
+                        return True
+        except Exception as e:
+            print(f"[Redis Rate Limit Warning] Distributed query failed: {e}. Falling back to memory limit.")
+            return None
+    return None
+
 
 
 
@@ -263,6 +300,88 @@ class SQLiteD1Client:
             db_file = "test_database.db"
             cls._shared_conn = sqlite3.connect(db_file, check_same_thread=False)
             cls._shared_conn.row_factory = sqlite3.Row
+            cursor = cls._shared_conn.cursor()
+            cursor.executescript("""
+                CREATE TABLE IF NOT EXISTS profiles (
+                    id VARCHAR(255) PRIMARY KEY,
+                    firebase_uid VARCHAR(255),
+                    email VARCHAR(255) UNIQUE,
+                    full_name VARCHAR(255),
+                    role VARCHAR(255),
+                    department VARCHAR(255),
+                    phone VARCHAR(255),
+                    is_active INTEGER DEFAULT 1,
+                    created_at VARCHAR(255),
+                    updated_at VARCHAR(255)
+                );
+                CREATE TABLE IF NOT EXISTS components (
+                    id VARCHAR(255) PRIMARY KEY,
+                    sku VARCHAR(255),
+                    name VARCHAR(255),
+                    category VARCHAR(255),
+                    description TEXT,
+                    total_stock INTEGER DEFAULT 0,
+                    available_stock INTEGER DEFAULT 0,
+                    borrowed_stock INTEGER DEFAULT 0,
+                    unit_cost REAL DEFAULT 0.0,
+                    location VARCHAR(255),
+                    image_url VARCHAR(255),
+                    unit VARCHAR(50),
+                    updated_at VARCHAR(255),
+                    created_at VARCHAR(255)
+                );
+                CREATE TABLE IF NOT EXISTS requests (
+                    id VARCHAR(255) PRIMARY KEY,
+                    student_id VARCHAR(255),
+                    component_id VARCHAR(255),
+                    quantity INTEGER,
+                    status VARCHAR(255),
+                    notes TEXT,
+                    reject_reason TEXT,
+                    requested_at VARCHAR(255),
+                    reviewed_by VARCHAR(255),
+                    reviewed_at VARCHAR(255),
+                    return_requested_at VARCHAR(255),
+                    returned_at VARCHAR(255)
+                );
+                CREATE TABLE IF NOT EXISTS purchase_orders (
+                    id VARCHAR(255) PRIMARY KEY,
+                    po_number VARCHAR(255),
+                    supplier_name VARCHAR(255),
+                    component_id VARCHAR(255),
+                    component_name VARCHAR(255),
+                    quantity INTEGER,
+                    unit_cost REAL,
+                    total_cost REAL,
+                    status VARCHAR(255),
+                    purchased_at VARCHAR(255)
+                );
+                CREATE TABLE IF NOT EXISTS notifications (
+                    id VARCHAR(255) PRIMARY KEY,
+                    user_id VARCHAR(255),
+                    title VARCHAR(255),
+                    message TEXT,
+                    type VARCHAR(255),
+                    is_read INTEGER DEFAULT 0,
+                    link_url VARCHAR(255),
+                    created_at VARCHAR(255)
+                );
+                CREATE TABLE IF NOT EXISTS reminder_logs (
+                    id VARCHAR(255) PRIMARY KEY,
+                    student_id VARCHAR(255),
+                    reminder_date VARCHAR(255),
+                    reminder_type VARCHAR(255)
+                );
+                CREATE TABLE IF NOT EXISTS audit_logs (
+                    id VARCHAR(255) PRIMARY KEY,
+                    user_id VARCHAR(255),
+                    action VARCHAR(255),
+                    details TEXT,
+                    created_at VARCHAR(255)
+                );
+            """)
+            cls._shared_conn.commit()
+            cursor.close()
         return cls._shared_conn
 
     async def execute(self, sql: str, args: Optional[list] = None):
@@ -366,15 +485,20 @@ async def lifespan(app: FastAPI):
     
     yield
     
-    # Cancel background tasks
+    # Cancel background tasks cleanly
     cleanup_task.cancel()
     for task in email_tasks:
         task.cancel()
+    try:
+        await asyncio.gather(cleanup_task, *email_tasks, return_exceptions=True)
+    except Exception:
+        pass
         
     global client
     if client:
         await client.close()
         client = None
+
 
 app = FastAPI(title="EI HUB API", description="Python FastAPI Backend for EI HUB", version="1.0.0", lifespan=lifespan)
 
@@ -446,11 +570,22 @@ async def rate_limit_middleware(request: Request, call_next):
     key = f"{client_ip}:{path.split('/')[2] if len(path.split('/')) > 2 else 'root'}"
     now = time.time()
     
-    # Prevent memory leak by bounding dictionary size
+    # 1. Try Distributed Redis Rate Limiting first
+    redis_allowed = await check_redis_rate_limit(key, limit, window)
+    if redis_allowed is False:
+        return Response(
+            content=json.dumps({"detail": "Too many requests. Please try again later."}),
+            status_code=429,
+            media_type="application/json",
+            headers={"Retry-After": str(window)}
+        )
+    elif redis_allowed is True:
+        return await call_next(request)
+
+    # 2. Local In-Memory Sliding Window Fallback (when Redis is unconfigured or unavailable)
     if len(RATE_LIMIT_REQUESTS) > 10000:
         RATE_LIMIT_REQUESTS.clear()
     
-    # Keep only request timestamps that fall within the current sliding window
     timestamps = [t for t in RATE_LIMIT_REQUESTS.get(key, []) if now - t < window]
     RATE_LIMIT_REQUESTS[key] = timestamps
     
@@ -464,6 +599,7 @@ async def rate_limit_middleware(request: Request, call_next):
         
     RATE_LIMIT_REQUESTS[key].append(now)
     return await call_next(request)
+
 
 # Strict email validation middleware rejecting any email value with uppercase letters
 @app.middleware("http")
@@ -921,6 +1057,13 @@ async def add_notification(user_id: str, title: str, message: str, type_str: str
         "link_url": link_url,
         "created_at": created_at_iso
     })
+    try:
+        await db_execute(
+            "INSERT INTO notifications (id, user_id, title, message, type, is_read, link_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            [notif_id, user_id, title, message, type_str, False, link_url, created_at_iso]
+        )
+    except Exception as e:
+        print(f"Error persisting notification to database: {e}")
 
 def validate_lowercase_email(email: str) -> str:
     if not email:
@@ -935,19 +1078,24 @@ def validate_lowercase_email(email: str) -> str:
 @app.post("/api/auth/reset-link")
 async def get_firebase_reset_link(req: ResetLinkRequest):
     try:
-        # Check if Firebase Admin is initialized
-        if not firebase_admin._apps:
-            raise HTTPException(status_code=500, detail="Firebase Admin SDK is not initialized. Please configure the service account.")
-
-        email_error = validate_lowercase_email(req.email.strip())
+        email_clean = req.email.strip().lower()
+        email_error = validate_lowercase_email(email_clean)
         if email_error:
             return JSONResponse(status_code=400, content={"error": email_error})
-            
+
+        generic_response = {"status": "success", "message": "If an authorized account exists for this email, a password reset link has been sent."}
+
         # Verify the user exists in profiles database first
-        profiles = await db_query("SELECT email FROM profiles WHERE email = ?", [req.email.strip()])
+        profiles = await db_query("SELECT email FROM profiles WHERE LOWER(email) = ?", [email_clean])
         if not profiles:
-            raise HTTPException(status_code=404, detail="This email is not registered in our database.")
-        
+            print(f"[Password Reset] Request for non-existent email '{email_clean}' - returning generic success to prevent enumeration.")
+            return generic_response
+
+        # Check if Firebase Admin is initialized
+        if not firebase_admin._apps:
+            print("[Password Reset] Firebase Admin SDK is not initialized. Cannot generate reset link.")
+            return generic_response
+
         # Generate the password reset link
         frontend_url = os.environ.get("FRONTEND_URL") or os.environ.get("VITE_APP_URL", "http://localhost:3000")
         if frontend_url.endswith("/"):
@@ -959,30 +1107,31 @@ async def get_firebase_reset_link(req: ResetLinkRequest):
             handle_code_in_app=True
         )
         
-        link = await asyncio.to_thread(
-            firebase_auth.generate_password_reset_link,
-            req.email.strip(),
-            action_code_settings
-        )
-        
-        # Enqueue the email to be sent by worker
-        html = f"""
-        <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 25px; border: 1px solid #e2e8f0; border-radius: 16px; background-color: #ffffff;">
-        <h2 style="color: #4f46e5; text-align: center; margin-top: 0; font-size: 22px;">EI HUB Password Reset</h2>
-        <p style="color: #334155; font-size: 14px; line-height: 1.6; text-align: center;">You requested a password reset for your EI HUB account. Click the button below to set a new password.</p>
-        <div style="text-align: center; margin: 30px 0;">
-        <a href="{link}" style="background-color: #4f46e5; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 600; display: inline-block;">Reset Password</a>
-        </div>
-        <p style="color: #64748b; font-size: 11px; text-align: center; margin-bottom: 0; border-top: 1px solid #f1f5f9; padding-top: 20px;">If you did not request this, you can safely ignore this email.</p>
-        </div>
-        """
-        await EMAIL_QUEUE.put((req.email.strip(), "EI HUB - Password Reset", html, None))
-        
-        return {"status": "success", "message": "Password reset email queued"}
+        try:
+            link = await asyncio.to_thread(
+                firebase_auth.generate_password_reset_link,
+                email_clean,
+                action_code_settings
+            )
+            
+            # Enqueue the email to be sent by worker
+            html = f"""
+            <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 25px; border: 1px solid #e2e8f0; border-radius: 16px; background-color: #ffffff;">
+            <h2 style="color: #4f46e5; text-align: center; margin-top: 0; font-size: 22px;">EI HUB Password Reset</h2>
+            <p style="color: #334155; font-size: 14px; line-height: 1.6; text-align: center;">You requested a password reset for your EI HUB account. Click the button below to set a new password.</p>
+            <div style="text-align: center; margin: 30px 0;">
+            <a href="{link}" style="background-color: #4f46e5; color: white; padding: 12px 24px; border-radius: 8px; text-decoration: none; font-weight: 600; display: inline-block;">Reset Password</a>
+            </div>
+            <p style="color: #64748b; font-size: 11px; text-align: center; margin-bottom: 0; border-top: 1px solid #f1f5f9; padding-top: 20px;">If you did not request this, you can safely ignore this email.</p>
+            </div>
+            """
+            await EMAIL_QUEUE.put((email_clean, "EI HUB - Password Reset", html, None))
+        except Exception as gen_err:
+            print(f"[Password Reset] Error generating link for '{email_clean}': {gen_err}")
+            
+        return generic_response
     except Exception as e:
-        print(f"Error generating password reset link: {e}")
-        if isinstance(e, HTTPException):
-            raise e
+        print(f"Error handling password reset request: {e}")
         return JSONResponse(status_code=400, content={"error": str(e)})
 
 # Global fetches tracking dictionary for request coalescing
@@ -1661,6 +1810,8 @@ async def return_process_request(id: str, data: dict = Body(...), user: dict = D
         raise HTTPException(status_code=404, detail="Request not found")
         
     req = reqs[0]
+    if req.get("status") == "returned":
+        raise HTTPException(status_code=400, detail="Return already processed or invalid request status")
     app_at = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
     
     stmt1 = Statement(
@@ -1944,10 +2095,20 @@ async def get_activity_logs():
 
 @app.get("/api/notifications")
 async def get_notifications(user: dict = Depends(get_current_user)):
+    try:
+        rows = await db_query("SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC", [user["uid"]])
+        if rows:
+            return rows
+    except Exception as e:
+        print(f"Error querying notifications from DB: {e}")
     return [n for n in reversed(in_memory_notifications) if n["user_id"] == user["uid"]]
 
 @app.post("/api/notifications/{id}/read")
 async def read_notification(id: str, user: dict = Depends(get_current_user)):
+    try:
+        await db_execute("UPDATE notifications SET is_read = 1 WHERE id = ? AND user_id = ?", [id, user["uid"]])
+    except Exception as e:
+        print(f"Error updating notification read state in DB: {e}")
     for n in in_memory_notifications:
         if n["id"] == id and n["user_id"] == user["uid"]:
             n["is_read"] = True
@@ -1955,6 +2116,10 @@ async def read_notification(id: str, user: dict = Depends(get_current_user)):
 
 @app.post("/api/notifications/read-all")
 async def read_all_notifications(user: dict = Depends(get_current_user)):
+    try:
+        await db_execute("UPDATE notifications SET is_read = 1 WHERE user_id = ?", [user["uid"]])
+    except Exception as e:
+        print(f"Error updating all notifications read state in DB: {e}")
     for n in in_memory_notifications:
         if n["user_id"] == user["uid"]:
             n["is_read"] = True
@@ -3199,60 +3364,11 @@ async def confirm_csv_import(req: ConfirmImportRequest, user: dict = Depends(req
     }
 
 
-# --- OCR Import Bill (Mocked) ---
+# --- OCR Import Bill (Real OCR Pipeline) ---
 @app.post("/api/purchases/import/preview")
 async def import_bill_preview(file: UploadFile = File(...), user: dict = Depends(require_admin)):
-    content = await file.read()
-    if len(content) > 5 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="File too large. Maximum size is 5MB.")
-    # Simulate a 1.5 second OCR delay
-    await asyncio.sleep(1.5)
-    
-    # Return a mocked structured response that matches our JSON schema
-    return {
-        "processing_time_ms": 1540,
-        "supplier": {
-            "name": "Robu.in Labs",
-            "gstin": "27AADCR2329L1Z5",
-            "email": "sales@robu.in"
-        },
-        "invoice": {
-            "invoice_number": "INV-2026-99321",
-            "date": datetime.now(timezone.utc).strftime("%d-%m-%Y")
-        },
-        "components": [
-            {
-                "name": "Raspberry Pi Pico W",
-                "hsn_code": "85423100",
-                "quantity": 10,
-                "unit_price": 550.00,
-                "gst_rate": 18,
-                "status": "Matched"
-            },
-            {
-                "name": "DHT22 Temperature Sensor",
-                "hsn_code": "90318000",
-                "quantity": 25,
-                "unit_price": 120.00,
-                "gst_rate": 18,
-                "status": "New"
-            },
-            {
-                "name": "Jumper Wires (F-F) 40pcs",
-                "hsn_code": "85444299",
-                "quantity": 50,
-                "unit_price": 45.00,
-                "gst_rate": 18,
-                "status": "Similar"
-            }
-        ],
-        "financials": {
-            "taxable_value": 10750.00,
-            "total_gst": 1935.00,
-            "discount": 0.00,
-            "grand_total": 12685.00
-        }
-    }
+    from app.api.routes.import_data import purchase_ocr
+    return await purchase_ocr(file=file, user=user)
 
 # Import routes after app definition to avoid circular import
 from app.api.routes.import_data import router as import_router
