@@ -212,9 +212,22 @@ def ensure_firebase_initialized() -> bool:
     if firebase_admin._apps:
         return True
 
+    # Safe presence logging (NEVER log values)
+    has_creds_json = bool(os.environ.get("FIREBASE_CREDENTIALS") or os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON"))
+    has_proj_id = bool(os.environ.get("FIREBASE_PROJECT_ID"))
+    has_client_email = bool(os.environ.get("FIREBASE_CLIENT_EMAIL"))
+    has_private_key = bool(os.environ.get("FIREBASE_PRIVATE_KEY"))
+    has_gcp_proj = bool(os.environ.get("GOOGLE_CLOUD_PROJECT"))
+
+    print(f"[FirebaseInit] FIREBASE_CREDENTIALS present: {has_creds_json}")
+    print(f"[FirebaseInit] FIREBASE_PROJECT_ID present: {has_proj_id}")
+    print(f"[FirebaseInit] FIREBASE_CLIENT_EMAIL present: {has_client_email}")
+    print(f"[FirebaseInit] FIREBASE_PRIVATE_KEY present: {has_private_key}")
+    print(f"[FirebaseInit] GOOGLE_CLOUD_PROJECT present: {has_gcp_proj}")
+
     app_options = {"projectId": project_id}
 
-    # 1. Try full JSON string from env var
+    # FIRST: Try full JSON string from env var (FIREBASE_CREDENTIALS or FIREBASE_SERVICE_ACCOUNT_JSON)
     firebase_creds_json = os.environ.get("FIREBASE_CREDENTIALS") or os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
     if firebase_creds_json:
         try:
@@ -223,12 +236,12 @@ def ensure_firebase_initialized() -> bool:
                 cred_dict["project_id"] = project_id
             cred = credentials.Certificate(cred_dict)
             firebase_admin.initialize_app(cred, app_options)
-            print(f"Firebase Admin SDK initialized successfully via FIREBASE_CREDENTIALS env var (project_id={project_id}).")
+            print(f"[FirebaseInit] Firebase Admin initialized: True (via FIREBASE_CREDENTIALS, project_id={project_id})")
             return True
         except Exception as e:
-            print(f"Error initializing Firebase via FIREBASE_CREDENTIALS env var: {e}")
+            print(f"[FirebaseInit] Error parsing FIREBASE_CREDENTIALS env var: {e}")
 
-    # 2. Try individual env vars (FIREBASE_PRIVATE_KEY + FIREBASE_CLIENT_EMAIL)
+    # SECOND: Try individual env vars (FIREBASE_PRIVATE_KEY + FIREBASE_CLIENT_EMAIL + FIREBASE_PROJECT_ID)
     private_key = os.environ.get("FIREBASE_PRIVATE_KEY")
     client_email = os.environ.get("FIREBASE_CLIENT_EMAIL")
     if private_key and client_email:
@@ -246,30 +259,27 @@ def ensure_firebase_initialized() -> bool:
             }
             cred = credentials.Certificate(cred_dict)
             firebase_admin.initialize_app(cred, app_options)
-            print(f"Firebase Admin SDK initialized successfully via individual env vars (project_id={project_id}).")
+            print(f"[FirebaseInit] Firebase Admin initialized: True (via individual env vars, project_id={project_id})")
             return True
         except Exception as e:
-            print(f"Error initializing Firebase via individual env vars: {e}")
+            print(f"[FirebaseInit] Error initializing via individual env vars: {e}")
 
-    # 3. Try JSON file path
-    json_path = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON_PATH") or os.path.join(os.path.dirname(__file__), "..", "ei-hub-9a4a2-firebase-adminsdk-fbsvc-80cd9a3be8.json")
+    # THIRD: Try local JSON file ONLY for local development if it exists
+    json_path = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON_PATH") or os.path.join(
+        os.path.dirname(__file__), "..", "ei-hub-9a4a2-firebase-adminsdk-fbsvc-80cd9a3be8.json"
+    )
     if os.path.exists(json_path):
         try:
             cred = credentials.Certificate(json_path)
             firebase_admin.initialize_app(cred, app_options)
-            print(f"Firebase Admin SDK initialized successfully via JSON file (project_id={project_id}).")
+            print(f"[FirebaseInit] Firebase Admin initialized: True (via local JSON file, project_id={project_id})")
             return True
         except Exception as e:
-            print(f"Error initializing Firebase via JSON file: {e}")
+            print(f"[FirebaseInit] Error initializing via local JSON file: {e}")
 
-    # 4. Fallback: Default Application Credentials with explicit app_options
-    try:
-        firebase_admin.initialize_app(options=app_options)
-        print(f"Firebase Admin SDK initialized with default credentials (project_id={project_id}).")
-        return True
-    except Exception as e:
-        print(f"Warning: Firebase Admin SDK initialization failed: {e}")
-        return False
+    # NO ADC FALLBACK: Do not call firebase_admin.initialize_app() without credentials.
+    print("[FirebaseInit] Firebase Admin initialized: False (No valid service account credentials found in environment)")
+    return False
 
 # Trigger initial load attempt
 firebase_initialized = ensure_firebase_initialized()
