@@ -193,32 +193,65 @@ if missing_vars:
     print(f"Startup Warning: {startup_error}")
 
 # Initialize Firebase Admin SDK
-firebase_initialized = False
-try:
-    if not firebase_admin._apps:
-        firebase_creds_json = os.environ.get("FIREBASE_CREDENTIALS")
-        if firebase_creds_json:
-            import json
+def ensure_firebase_initialized() -> bool:
+    if firebase_admin._apps:
+        return True
+
+    # 1. Try full JSON string from env var
+    firebase_creds_json = os.environ.get("FIREBASE_CREDENTIALS") or os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
+    if firebase_creds_json:
+        try:
             cred_dict = json.loads(firebase_creds_json)
             cred = credentials.Certificate(cred_dict)
             firebase_admin.initialize_app(cred)
-            firebase_initialized = True
-            print("Firebase Admin SDK initialized successfully using FIREBASE_CREDENTIALS env var.")
-        else:
-            # Fallback to json path if available
-            json_path = os.path.join(os.path.dirname(__file__), "..", "ei-hub-9a4a2-firebase-adminsdk-fbsvc-80cd9a3be8.json")
-            if os.path.exists(json_path):
-                cred = credentials.Certificate(json_path)
-                firebase_admin.initialize_app(cred)
-                firebase_initialized = True
-                print("Firebase Admin SDK initialized successfully using JSON file.")
-            else:
-                print("Warning: Firebase Admin SDK initialization failed: No JSON file or env vars.")
-    else:
-        firebase_initialized = True
-        print("Firebase Admin SDK already initialized.")
-except Exception as e:
-    print(f"Warning: Firebase Admin SDK initialization failed: {e}. Programmatic reset link generation will not be active.")
+            print("Firebase Admin SDK initialized successfully via FIREBASE_CREDENTIALS env var.")
+            return True
+        except Exception as e:
+            print(f"Error initializing Firebase via FIREBASE_CREDENTIALS env var: {e}")
+
+    # 2. Try individual env vars (FIREBASE_PRIVATE_KEY + FIREBASE_CLIENT_EMAIL)
+    private_key = os.environ.get("FIREBASE_PRIVATE_KEY")
+    client_email = os.environ.get("FIREBASE_CLIENT_EMAIL")
+    project_id = os.environ.get("FIREBASE_PROJECT_ID") or "ei-hub-9a4a2"
+    if private_key and client_email:
+        try:
+            pk = private_key.replace("\\n", "\n")
+            cred_dict = {
+                "type": "service_account",
+                "project_id": project_id,
+                "private_key": pk,
+                "client_email": client_email,
+                "token_uri": "https://oauth2.googleapis.com/token"
+            }
+            cred = credentials.Certificate(cred_dict)
+            firebase_admin.initialize_app(cred)
+            print("Firebase Admin SDK initialized successfully via individual env vars.")
+            return True
+        except Exception as e:
+            print(f"Error initializing Firebase via individual env vars: {e}")
+
+    # 3. Try JSON file path
+    json_path = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON_PATH") or os.path.join(os.path.dirname(__file__), "..", "ei-hub-9a4a2-firebase-adminsdk-fbsvc-80cd9a3be8.json")
+    if os.path.exists(json_path):
+        try:
+            cred = credentials.Certificate(json_path)
+            firebase_admin.initialize_app(cred)
+            print("Firebase Admin SDK initialized successfully via JSON file.")
+            return True
+        except Exception as e:
+            print(f"Error initializing Firebase via JSON file: {e}")
+
+    # 4. Fallback: Default Application Credentials
+    try:
+        firebase_admin.initialize_app()
+        print("Firebase Admin SDK initialized with default credentials.")
+        return True
+    except Exception as e:
+        print(f"Warning: Firebase Admin SDK initialization failed: {e}")
+        return False
+
+# Trigger initial load attempt
+firebase_initialized = ensure_firebase_initialized()
 
 # Connect to Cloudflare D1 Database
 CF_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
@@ -914,6 +947,7 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
 
     # Verify standard Firebase JWT using Admin SDK
     try:
+        ensure_firebase_initialized()
         decoded = firebase_auth.verify_id_token(token, check_revoked=True, clock_skew_seconds=60)
         uid = decoded.get("uid")
         email = decoded.get("email")
