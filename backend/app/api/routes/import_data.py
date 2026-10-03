@@ -75,6 +75,10 @@ async def analyze_components(file: UploadFile = File(...), user=Depends(require_
         elif filename.endswith((".xlsx", ".xls")):
             wb = load_workbook(io.BytesIO(content), data_only=True)
             ws = wb.active
+            if ws is None and wb.worksheets:
+                ws = wb.worksheets[0]
+            if ws is None:
+                raise HTTPException(status_code=400, detail="Workbook contains no valid worksheet.")
             for r in ws.iter_rows(values_only=True):
                 rows_list.append(list(r))
         else:
