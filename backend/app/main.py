@@ -193,18 +193,37 @@ if missing_vars:
     print(f"Startup Warning: {startup_error}")
 
 # Initialize Firebase Admin SDK
+DEFAULT_FIREBASE_PROJECT_ID = "ei-hub-9a4a2"
+
+def get_firebase_project_id() -> str:
+    return (
+        os.environ.get("FIREBASE_PROJECT_ID")
+        or os.environ.get("GOOGLE_CLOUD_PROJECT")
+        or DEFAULT_FIREBASE_PROJECT_ID
+    )
+
 def ensure_firebase_initialized() -> bool:
+    project_id = get_firebase_project_id()
+    
+    # Ensure GOOGLE_CLOUD_PROJECT is explicitly set in environment
+    if "GOOGLE_CLOUD_PROJECT" not in os.environ:
+        os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
+
     if firebase_admin._apps:
         return True
+
+    app_options = {"projectId": project_id}
 
     # 1. Try full JSON string from env var
     firebase_creds_json = os.environ.get("FIREBASE_CREDENTIALS") or os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
     if firebase_creds_json:
         try:
             cred_dict = json.loads(firebase_creds_json)
+            if not cred_dict.get("project_id"):
+                cred_dict["project_id"] = project_id
             cred = credentials.Certificate(cred_dict)
-            firebase_admin.initialize_app(cred)
-            print("Firebase Admin SDK initialized successfully via FIREBASE_CREDENTIALS env var.")
+            firebase_admin.initialize_app(cred, app_options)
+            print(f"Firebase Admin SDK initialized successfully via FIREBASE_CREDENTIALS env var (project_id={project_id}).")
             return True
         except Exception as e:
             print(f"Error initializing Firebase via FIREBASE_CREDENTIALS env var: {e}")
@@ -212,10 +231,12 @@ def ensure_firebase_initialized() -> bool:
     # 2. Try individual env vars (FIREBASE_PRIVATE_KEY + FIREBASE_CLIENT_EMAIL)
     private_key = os.environ.get("FIREBASE_PRIVATE_KEY")
     client_email = os.environ.get("FIREBASE_CLIENT_EMAIL")
-    project_id = os.environ.get("FIREBASE_PROJECT_ID") or "ei-hub-9a4a2"
     if private_key and client_email:
         try:
-            pk = private_key.replace("\\n", "\n")
+            pk = private_key.strip()
+            if pk.startswith('"') and pk.endswith('"'):
+                pk = pk[1:-1]
+            pk = pk.replace("\\n", "\n")
             cred_dict = {
                 "type": "service_account",
                 "project_id": project_id,
@@ -224,8 +245,8 @@ def ensure_firebase_initialized() -> bool:
                 "token_uri": "https://oauth2.googleapis.com/token"
             }
             cred = credentials.Certificate(cred_dict)
-            firebase_admin.initialize_app(cred)
-            print("Firebase Admin SDK initialized successfully via individual env vars.")
+            firebase_admin.initialize_app(cred, app_options)
+            print(f"Firebase Admin SDK initialized successfully via individual env vars (project_id={project_id}).")
             return True
         except Exception as e:
             print(f"Error initializing Firebase via individual env vars: {e}")
@@ -235,16 +256,16 @@ def ensure_firebase_initialized() -> bool:
     if os.path.exists(json_path):
         try:
             cred = credentials.Certificate(json_path)
-            firebase_admin.initialize_app(cred)
-            print("Firebase Admin SDK initialized successfully via JSON file.")
+            firebase_admin.initialize_app(cred, app_options)
+            print(f"Firebase Admin SDK initialized successfully via JSON file (project_id={project_id}).")
             return True
         except Exception as e:
             print(f"Error initializing Firebase via JSON file: {e}")
 
-    # 4. Fallback: Default Application Credentials
+    # 4. Fallback: Default Application Credentials with explicit app_options
     try:
-        firebase_admin.initialize_app()
-        print("Firebase Admin SDK initialized with default credentials.")
+        firebase_admin.initialize_app(options=app_options)
+        print(f"Firebase Admin SDK initialized with default credentials (project_id={project_id}).")
         return True
     except Exception as e:
         print(f"Warning: Firebase Admin SDK initialization failed: {e}")
