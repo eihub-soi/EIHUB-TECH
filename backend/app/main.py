@@ -1031,22 +1031,23 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
             
     except HTTPException:
         raise
-    except Exception as e:
-        # Fallback check inside profiles table for direct IDs
-        try:
-            profiles = await db_query("SELECT id, email, full_name, role FROM profiles WHERE id = ?", [token])
-            if profiles:
-                p = profiles[0]
-                res_dict = {
-                    "uid": p["id"],
-                    "email": p["email"],
-                    "name": p["full_name"],
-                    "role": p["role"]
-                }
-                return await cache_and_return(res_dict)
-        except Exception:
-            pass
-        raise HTTPException(status_code=401, detail=f"Auth error: {str(e)}")
+    except Exception:
+        if not is_production:
+            # Fallback check inside profiles table for direct IDs ONLY in non-production mode
+            try:
+                profiles = await db_query("SELECT id, email, full_name, role FROM profiles WHERE id = ?", [token])
+                if profiles:
+                    p = profiles[0]
+                    res_dict = {
+                        "uid": p["id"],
+                        "email": p["email"],
+                        "name": p["full_name"],
+                        "role": p["role"]
+                    }
+                    return await cache_and_return(res_dict)
+            except Exception:
+                pass
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 async def require_admin(user: dict = Depends(get_current_user)) -> Dict[str, Any]:
     if user.get("role") not in ["admin", "super_admin"]:

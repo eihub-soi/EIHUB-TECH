@@ -40,91 +40,29 @@ export const ForgotPasswordPage: React.FC = () => {
     const normalizedEmail = email;
     setIsLoading(true);
     try {
-      if (!isD1Configured) {
-        throw new Error("Database connection is not configured.");
-      }
-
-      // 1. Check if the user exists in our D1 profiles database
-      const profileRes = await d1Client.execute({
-        sql: "SELECT full_name FROM profiles WHERE email = ?",
-        args: [normalizedEmail],
+      const res = await fetch("/api/auth/reset-link", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email: normalizedEmail,
+        }),
       });
 
-      const profile =
-        profileRes.rows && profileRes.rows.length > 0
-          ? profileRes.rows[0]
-          : null;
-
-      if (profile) {
-        if (isFirebaseConfigured && firebaseConfig.apiKey) {
-          // 2. Request the password reset link from our backend API programmatically
-          const res = await fetch("/api/auth/reset-link", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              email: normalizedEmail,
-            }),
-          });
-
-          const data = await res.json();
-          if (!res.ok) {
-            throw new Error(
-              data.detail || "Failed to generate Firebase password reset link.",
-            );
-          }
-
-          const firebaseResetLink = data.oobLink;
-          const fullName = (profile.full_name as string) || "User";
-
-          // 3. Send the raw Firebase reset link directly using our Brevo custom email template
-          await sendBrevoPasswordResetLink(
-            normalizedEmail,
-            fullName,
-            firebaseResetLink,
-          );
-        } else {
-          // Fallback custom token flow via Brevo
-          const fullName = (profile.full_name as string) || "User";
-
-          // 2. Generate a secure, unique reset token
-          const token =
-            Math.random().toString(36).substring(2, 15) +
-            Date.now().toString(36);
-          const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString(); // 15 mins expiry
-
-          // 3. Store the token in D1 password_resets table
-          await d1Client.execute({
-            sql: "INSERT OR REPLACE INTO password_resets (email, token, expires_at) VALUES (?, ?, ?)",
-            args: [normalizedEmail, token, expiresAt],
-          });
-
-          // 4. Construct custom reset landing URL pointing to our custom reset-password route
-          const resetLink = `${window.location.origin}/reset-password?email=${encodeURIComponent(normalizedEmail)}&token=${token}`;
-
-          // 5. Send custom reset link email via Brevo
-          await sendBrevoPasswordResetLink(
-            normalizedEmail,
-            fullName,
-            resetLink,
-          );
-        }
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(
+          data.error || data.detail || "Failed to generate password reset link.",
+        );
       }
 
-      // Display success message (always show success to prevent email enumeration)
       setIsSent(true);
       toast.success(
-        `If the email exists, a password reset link has been sent successfully.`,
+        "If the email exists, a password reset link has been sent successfully.",
       );
     } catch (err: any) {
-      console.error(
-        "[ForgotPassword] Failed to generate custom reset link:",
-        err,
-      );
-      toast.error(
-        err.message || "Failed to dispatch reset email. Please try again.",
-      );
+      toast.error(err.message || "Failed to process request.");
     } finally {
       setIsLoading(false);
     }

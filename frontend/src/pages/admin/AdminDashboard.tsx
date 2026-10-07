@@ -31,7 +31,7 @@ import {
 import { apiRequest } from "../../utils/api";
 
 export const AdminDashboard: React.FC = () => {
-  const { user } = useAuth();
+  const { user, isLoading: isAuthLoading } = useAuth();
   const navigate = useNavigate();
 
   const [systemOverviewData, setSystemOverviewData] = React.useState<{ day: string; users: number; requests: number }[]>([]);
@@ -53,8 +53,7 @@ export const AdminDashboard: React.FC = () => {
         setSystemOverviewData(formatted);
         setIsReconnecting(false);
       }
-    } catch (err) {
-      console.error("Failed to fetch system overview:", err);
+    } catch {
       setIsReconnecting(true);
     } finally {
       if (isInitial) {
@@ -64,14 +63,16 @@ export const AdminDashboard: React.FC = () => {
   }, []);
 
   React.useEffect(() => {
-    fetchOverview(true);
+    if (!isAuthLoading && user) {
+      fetchOverview(true);
 
-    const interval = setInterval(() => {
-      fetchOverview(false);
-    }, 30000);
+      const interval = setInterval(() => {
+        fetchOverview(false);
+      }, 30000);
 
-    return () => clearInterval(interval);
-  }, [fetchOverview]);
+      return () => clearInterval(interval);
+    }
+  }, [fetchOverview, isAuthLoading, user]);
 
   const stats = mockEngine.getSystemStats();
 

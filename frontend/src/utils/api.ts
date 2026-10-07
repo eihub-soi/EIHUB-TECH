@@ -4,21 +4,38 @@ import { auth as firebaseAuth } from "../firebase/client";
  * Returns authorization headers containing the active user's Firebase ID token
  * or their local demo identifier.
  */
-export const getAuthHeaders = async (): Promise<Record<string, string>> => {
+export const getAuthHeaders = async (forceRefresh = false): Promise<Record<string, string>> => {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
 
-  if (firebaseAuth && firebaseAuth.currentUser) {
+  if (firebaseAuth) {
     try {
-      // Force refresh of the token to ensure it isn't expired
-      const token = await firebaseAuth.currentUser.getIdToken(true);
-      headers["Authorization"] = `Bearer ${token}`;
-    } catch (e) {
-      console.error("[API Helper] Error getting Firebase ID token:", e);
+      if (typeof (firebaseAuth as any).authStateReady === 'function') {
+        await firebaseAuth.authStateReady();
+      }
+    } catch {
+      // Ignore authStateReady error
     }
+
+    if (firebaseAuth.currentUser) {
+      try {
+        const token = await firebaseAuth.currentUser.getIdToken(forceRefresh);
+        if (token) {
+          localStorage.setItem("ei_hub_auth_token", token);
+          headers["Authorization"] = `Bearer ${token}`;
+          return headers;
+        }
+      } catch {
+        // Safe silent fallback to cached token
+      }
+    }
+  }
+
+  const cachedToken = localStorage.getItem("ei_hub_auth_token");
+  if (cachedToken) {
+    headers["Authorization"] = `Bearer ${cachedToken}`;
   } else {
-    // Fallback for role switching / local demo sessions
     const savedId = localStorage.getItem("ei_hub_active_user_id");
     if (savedId) {
       headers["Authorization"] = `Bearer ${savedId}`;
@@ -33,9 +50,9 @@ export const getAuthHeaders = async (): Promise<Record<string, string>> => {
  */
 export const apiRequest = async (
   url: string,
-  options: RequestInit & { timeout?: number } = {},
+  options: RequestInit & { timeout?: number; retryOn401?: boolean } = {},
 ): Promise<any> => {
-  const { timeout = 10000, ...fetchOptions } = options;
+  const { timeout = 10000, retryOn401 = true, ...fetchOptions } = options;
   
   const headers = await getAuthHeaders();
   const mergedOptions = {
@@ -53,8 +70,28 @@ export const apiRequest = async (
   mergedOptions.signal = signal;
 
   try {
-    const response = await fetch(url, mergedOptions);
+    let response = await fetch(url, mergedOptions);
     if (id) clearTimeout(id);
+
+    // If request failed with 401 and retryOn401 is enabled, attempt one force-refresh of Firebase ID token
+    if (response.status === 401 && retryOn401 && firebaseAuth?.currentUser) {
+      try {
+        const freshHeaders = await getAuthHeaders(true);
+        const retryOptions = {
+          ...mergedOptions,
+          headers: {
+            ...freshHeaders,
+            ...(fetchOptions.headers || {}),
+          },
+        };
+        const retryResponse = await fetch(url, retryOptions);
+        if (retryResponse.ok) {
+          response = retryResponse;
+        }
+      } catch {
+        // Fall through to standard error handling
+      }
+    }
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -92,7 +129,6 @@ export const apiRequest = async (
     if (id) clearTimeout(id);
     if (error.name === 'AbortError') {
       if (hasExternalSignal) {
-        // Propagate standard AbortError if cancelled externally
         throw error;
       }
       throw new Error(`Request timed out after ${timeout}ms`);

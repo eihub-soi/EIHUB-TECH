@@ -14,7 +14,7 @@ export const ProtectedRoute: React.FC<ProtectedRouteProps> = ({
 }) => {
   const { user, role, isLoading } = useAuth();
 
-  if (isLoading && !user) {
+  if (isLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#F8FAFC]">
         <div className="flex flex-col items-center justify-center space-y-4">

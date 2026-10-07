@@ -1,5 +1,6 @@
 // D1 HTTP API Client (Replaces D1 client)
 // This proxy forwards all queries to the FastAPI backend at /api/query
+import { getAuthHeaders } from "../utils/api";
 
 export const isD1Configured = true;
 
@@ -129,12 +130,12 @@ class D1QueryBuilder {
   }
 
   private async fetchQuery(sql: string, args: any[]) {
-    const token = localStorage.getItem("ei_hub_auth_token") || localStorage.getItem("ei_hub_active_user_id") || "";
+    const authHeaders = await getAuthHeaders();
     const response = await fetch("/api/query", {
       method: "POST",
       headers: {
+        ...authHeaders,
         "Content-Type": "application/json",
-        Authorization: token ? `Bearer ${token}` : "",
       },
       body: JSON.stringify({ sql, args }),
     });
@@ -429,12 +430,12 @@ export const d1 = {
 
 export const client = {
   async execute({ sql, args }: { sql: string; args?: any[] }) {
-    const token = localStorage.getItem("ei_hub_auth_token") || localStorage.getItem("ei_hub_active_user_id") || "";
+    const authHeaders = await getAuthHeaders();
     const response = await fetch("/api/query", {
       method: "POST",
       headers: {
+        ...authHeaders,
         "Content-Type": "application/json",
-        Authorization: token ? `Bearer ${token}` : "",
       },
       body: JSON.stringify({ sql, args: args || [] }),
     });

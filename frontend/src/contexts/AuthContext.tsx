@@ -129,18 +129,25 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         
         try {
           if (fbUser) {
+            try {
+              const token = await fbUser.getIdToken();
+              localStorage.setItem("ei_hub_auth_token", token);
+            } catch {
+              // Ignore token fetch error
+            }
+
             if (fbUser.email && !validateEmail(fbUser.email).isValid) {
               try {
                 await fbUser.delete();
-              } catch (e) {
-                console.error(
-                  "Error deleting unauthorized Google user in auth listener:",
-                  e,
-                );
+              } catch {
+                // Ignore delete error
               }
               await firebaseSignOut(firebaseAuth!);
               if (isMountedRef.current) {
                 setUser(null);
+                localStorage.removeItem("ei_hub_auth_token");
+                localStorage.removeItem("ei_hub_active_user_id");
+                localStorage.removeItem("ei_hub_active_user_profile");
                 setIsLoading(false);
               }
               return;
@@ -148,13 +155,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
             let profile = null;
             try {
               profile = await fetchProfileWithRetry(controller.signal);
-            } catch (err: any) {
-              if (err.name !== 'AbortError') {
-                console.warn(
-                  "[AuthContext] Failed to query profile from FastAPI backend:",
-                  err,
-                );
-              }
+            } catch {
+              // Ignore profile query error
             }
 
             // Local fallback if FastAPI query failed
@@ -194,14 +196,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
                     displayName: fullProfile.full_name,
                     photoURL: fullProfile.avatar_url || undefined,
                   });
-                  console.log(
-                    "[AuthContext] Successfully synced D1 profile details to Firebase Auth login credentials.",
-                  );
-                } catch (updateErr) {
-                  console.warn(
-                    "[AuthContext] Failed to sync profile details to Firebase Auth:",
-                    updateErr,
-                  );
+                } catch {
+                  // Safe silent fail
                 }
               }
             }
@@ -209,13 +205,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
             // No fbUser
             if (isMountedRef.current) {
               setUser(null);
+              localStorage.removeItem("ei_hub_auth_token");
             }
           }
-        } catch (err) {
-          console.error(
-            "Error fetching D1 profile on Firebase auth change:",
-            err,
-          );
+        } catch {
+          // Ignore auth listener error
         } finally {
           if (isMountedRef.current && !controller.signal.aborted) {
             setIsLoading(false);
@@ -310,6 +304,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     password: string,
     role: UserRole,
   ) => {
+    const t0 = performance.now();
     setIsLoading(true);
     const emailValidation = validateEmail(email);
     if (!emailValidation.isValid) {
@@ -321,29 +316,32 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       throw new Error("Password cannot be empty.");
     }
     try {
-      // 1. Try Firebase Authentication (Primary & Exclusive when active)
       if (isFirebaseConfigured && firebaseAuth) {
-        console.log(
-          "[AuthContext] Attempting login via Firebase Auth (Exclusive Provider)...",
-        );
-        const finalEmailCheck = validateEmail(email);
-        if (!finalEmailCheck.isValid) {
-          throw new Error(finalEmailCheck.error);
+        let userCredential;
+        try {
+          userCredential = await signInWithEmailAndPassword(
+            firebaseAuth,
+            email,
+            password,
+          );
+        } catch {
+          throw new Error("Invalid ID/password");
         }
-        const userCredential = await signInWithEmailAndPassword(
-          firebaseAuth,
-          email,
-          password,
-        );
-        if (userCredential.user) {
+
+        if (userCredential?.user) {
+          const t1 = performance.now();
+          try {
+            const token = await userCredential.user.getIdToken();
+            localStorage.setItem("ei_hub_auth_token", token);
+          } catch {
+            // Ignore token error
+          }
+
           let profile = null;
           try {
-            profile = await apiRequest("/api/profiles", { timeout: 5000 });
-          } catch (err) {
-            console.warn(
-              "[AuthContext] Failed to query profile from FastAPI backend during login:",
-              err,
-            );
+            profile = await apiRequest("/api/profiles", { timeout: 3000 });
+          } catch {
+            // Fallback lookup
           }
 
           if (!profile) {
@@ -360,7 +358,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
           }
 
           if (!profile) {
-            const emailLower = email;
+            const emailLower = email.toLowerCase();
             let newRole: UserRole = "student";
             let fullName = "User";
             let dept = "Electronics & Communication Engineering";
@@ -378,7 +376,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
             try {
               profile = await apiRequest("/api/profiles/sync", {
-                timeout: 5000,
+                timeout: 3000,
                 method: "POST",
                 body: JSON.stringify({
                   id: newId,
@@ -395,11 +393,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
                   username: userCredential.user.email || email,
                 }),
               });
-            } catch (err) {
-              console.error(
-                "[AuthContext] Error syncing profile with FastAPI backend during email login:",
-                err,
-              );
+            } catch {
+              // Ignore profile sync failure
             }
 
             if (!profile && mockEngine.isMockEnabled()) {
@@ -426,11 +421,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
             }
           }
 
+          const t2 = performance.now();
           if (profile) {
             if (profile.role !== role) {
-              throw new Error(
-                `This account is registered as a ${profile.role.toUpperCase()}, not ${role.toUpperCase()}.`,
-              );
+              try {
+                await firebaseSignOut(firebaseAuth);
+              } catch {
+                // Ignore signout error
+              }
+              localStorage.removeItem("ei_hub_auth_token");
+              localStorage.removeItem("ei_hub_active_user_id");
+              localStorage.removeItem("ei_hub_active_user_profile");
+              setUser(null);
+              throw new Error("Invalid ID/password");
             }
             const fullProfile = {
               ...profile,
@@ -442,60 +445,56 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
               "ei_hub_active_user_profile",
               JSON.stringify(fullProfile),
             );
-            mockEngine.logActivity("LOGIN", "USER", profile.id, {
-              email: fullProfile.email,
-              role: fullProfile.role,
-            });
+            const t3 = performance.now();
+            (window as any).__lastLoginMetrics = {
+              t0,
+              t1,
+              t2,
+              t3,
+              totalMs: t3 - t0,
+            };
             return;
           } else {
-            throw new Error("User profile record could not be found.");
+            throw new Error("Invalid ID/password");
           }
         }
       } else if (isD1Configured) {
-        // Fallback check sequence if Firebase is not configured
-        console.log(
-          "[AuthContext] Firebase Auth not active. Attempting login via D1 Auth...",
-        );
         const { data: authData, error: authError } =
           await d1.auth.signInWithPassword({
             email,
             password,
           });
 
-        if (authError) {
-          throw new Error(authError.message);
+        if (authError || !authData?.user) {
+          throw new Error("Invalid ID/password");
         }
 
-        if (authData?.user) {
-          const { data: profile } = await d1
-            .from("profiles")
-            .select("*")
-            .eq("id", authData.user.id)
-            .single();
+        const { data: profile } = await d1
+          .from("profiles")
+          .select("*")
+          .eq("id", authData.user.id)
+          .single();
 
-          if (profile) {
-            if (profile.role !== role) {
-              throw new Error(
-                `This account is registered as a ${profile.role.toUpperCase()}, not ${role.toUpperCase()}.`,
-              );
-            }
-            setUser(profile as Profile);
-            localStorage.setItem("ei_hub_active_user_id", profile.id);
-            localStorage.setItem(
-              "ei_hub_active_user_profile",
-              JSON.stringify(profile),
-            );
-            mockEngine.logActivity("LOGIN", "USER", profile.id, {
-              email: (profile as Profile).email,
-              role: (profile as Profile).role,
-            });
-            return;
-          } else {
-            throw new Error("User profile record could not be found.");
+        if (profile) {
+          if (profile.role !== role) {
+            d1.auth.signOut();
+            localStorage.removeItem("ei_hub_auth_token");
+            localStorage.removeItem("ei_hub_active_user_id");
+            localStorage.removeItem("ei_hub_active_user_profile");
+            setUser(null);
+            throw new Error("Invalid ID/password");
           }
+          setUser(profile as Profile);
+          localStorage.setItem("ei_hub_active_user_id", profile.id);
+          localStorage.setItem(
+            "ei_hub_active_user_profile",
+            JSON.stringify(profile),
+          );
+          return;
+        } else {
+          throw new Error("Invalid ID/password");
         }
       } else {
-        // Fallback for mock mode if both Firebase and D1 are completely disabled
         const credentials = JSON.parse(
           localStorage.getItem("ei_hub_mock_credentials") || "{}",
         );
@@ -505,26 +504,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
           credentials["admin-02@kgkite.ac.in"] = "24admin@71";
 
         const correctPassword = credentials[email];
-        if (!correctPassword) {
-          throw new Error("Invalid email address. Account not registered.");
-        }
-
-        if (correctPassword !== password) {
-          throw new Error("Incorrect password. Please try again.");
+        if (!correctPassword || correctPassword !== password) {
+          throw new Error("Invalid ID/password");
         }
 
         const currentProfiles = mockEngine.getProfiles();
         const found = currentProfiles.find(
           (p) => p.email && typeof p.email === "string" && p.email === email,
         );
-        if (!found) {
-          throw new Error("Profile details not found in registry.");
-        }
-
-        if (found.role !== role) {
-          throw new Error(
-            `This account is registered as a ${found.role.toUpperCase()}, not ${role.toUpperCase()}.`,
-          );
+        if (!found || found.role !== role) {
+          throw new Error("Invalid ID/password");
         }
 
         setUser(found);
@@ -533,11 +522,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
           "ei_hub_active_user_profile",
           JSON.stringify(found),
         );
-        mockEngine.logActivity("LOGIN", "USER", found.id, {
-          email: found.email,
-          role: found.role,
-        });
       }
+    } catch (err: any) {
+      if (
+        err.message === "ID/email cannot be empty." ||
+        err.message === "Password cannot be empty." ||
+        err.message?.includes("must be") ||
+        err.message?.includes("lowercase")
+      ) {
+        throw err;
+      }
+      throw new Error("Invalid ID/password");
     } finally {
       setIsLoading(false);
     }
@@ -719,6 +714,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
       d1.auth.signOut();
     }
     setUser(null);
+    localStorage.removeItem("ei_hub_auth_token");
     localStorage.removeItem("ei_hub_active_user_id");
     localStorage.removeItem("ei_hub_active_user_profile");
   };

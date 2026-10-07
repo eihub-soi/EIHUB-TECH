@@ -106,32 +106,47 @@ export const LoginPage: React.FC = () => {
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!email.trim()) {
+      setLoginError("ID/email cannot be empty.");
+      return;
+    }
     const emailValidation = validateEmail(email);
     if (!emailValidation.isValid) {
-      setLoginError(emailValidation.error);
+      if (emailValidation.error.includes("lowercase")) {
+        setLoginError(emailValidation.error);
+        return;
+      }
+      setLoginError("Invalid ID/password");
       return;
     }
     if (!password) {
-      toast.error('Password cannot be empty.');
+      setLoginError("Password cannot be empty.");
       return;
     }
-    if (isLoginEmailInvalid || isLoading) {
+    if (isLoading) {
       return;
     }
 
     setIsLoading(true);
-    setLoginError('');
+    setLoginError("");
     try {
       await loginWithEmail(email, password, activeTab);
       toast.success(`Successfully logged in as ${activeTab.toUpperCase()}!`);
 
       // Redirect to respective dashboard
-      if (activeTab === 'student') navigate('/student/dashboard');
-      else if (activeTab === 'faculty') navigate('/faculty/dashboard');
-      else navigate('/admin/dashboard');
+      if (activeTab === "student") navigate("/student/dashboard");
+      else if (activeTab === "faculty") navigate("/faculty/dashboard");
+      else navigate("/admin/dashboard");
     } catch (err: any) {
-      // Suppress logging login failures to the console to comply with user's console hygiene requirement
-      setLoginError('Invalid Email ID/Password');
+      if (
+        err.message === "ID/email cannot be empty." ||
+        err.message === "Password cannot be empty." ||
+        err.message?.includes("lowercase")
+      ) {
+        setLoginError(err.message);
+      } else {
+        setLoginError("Invalid ID/password");
+      }
     } finally {
       setIsLoading(false);
     }
