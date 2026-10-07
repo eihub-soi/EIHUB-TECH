@@ -720,29 +720,34 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
   };
 
   useEffect(() => {
-    if (user && isD1Configured) {
+    if (user?.id) {
       mockEngine
         .syncWithD1()
         .catch((err) => console.error("D1 sync on user change failed:", err));
     }
-  }, [user]);
+  }, [user?.id]);
 
   useEffect(() => {
     const handleProfilesChange = () => {
-      if (user) {
+      if (user?.id) {
         const latestProfiles = mockEngine.getProfiles();
         const updatedProfile = latestProfiles.find((p) => p.id === user.id);
         if (updatedProfile) {
-          const hasChanged =
-            JSON.stringify(updatedProfile) !== JSON.stringify(user);
-          if (hasChanged) {
+          const hasEssentialChanges =
+            updatedProfile.role !== user.role ||
+            updatedProfile.full_name !== user.full_name ||
+            updatedProfile.email !== user.email ||
+            updatedProfile.department !== user.department ||
+            updatedProfile.is_active !== user.is_active;
+
+          if (hasEssentialChanges) {
             console.log(
               "[AuthContext] Active profile change detected. Syncing session details.",
             );
-            setUser(updatedProfile);
+            setUser({ ...user, ...updatedProfile });
             localStorage.setItem(
               "ei_hub_active_user_profile",
-              JSON.stringify(updatedProfile),
+              JSON.stringify({ ...user, ...updatedProfile }),
             );
           }
         }
@@ -753,7 +758,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     return () => {
       unsubscribe();
     };
-  }, [user]);
+  }, [user?.id, user?.role, user?.full_name, user?.email, user?.department, user?.is_active]);
 
   return (
     <AuthContext.Provider

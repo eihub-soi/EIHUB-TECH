@@ -27,24 +27,24 @@ const STORAGE_KEYS = {
 class MockEngine {
   private listeners: Array<() => void> = [];
   private syncPromise: Promise<void> | null = null;
+  private lastSyncTime: number = 0;
 
   constructor() {
     this.initStorage();
-    // Perform initial synchronization with Python backend
-    this.syncWithD1()
-      .then(() => {
-        this.checkForDeadlineReminders();
-      })
-      .catch((err) => console.error("[MockEngine] Initial sync failed:", err));
   }
 
   /**
    * Synchronizes local storage data with the Python FastAPI backend
    */
-  public async syncWithD1(): Promise<void> {
+  public async syncWithD1(force = false): Promise<void> {
     // Check if token exists before trying to sync to prevent 401 spam when logged out
     const token = localStorage.getItem("ei_hub_auth_token");
     if (!token) return;
+
+    const now = Date.now();
+    if (!force && now - this.lastSyncTime < 5000) {
+      return;
+    }
 
     if (this.syncPromise) {
       return this.syncPromise;
@@ -52,6 +52,7 @@ class MockEngine {
 
     this.syncPromise = (async () => {
       try {
+        this.lastSyncTime = Date.now();
         console.log(
           "[MockEngine] Synchronizing datasets with Python Backend...",
         );
@@ -101,12 +102,14 @@ class MockEngine {
           }
         }
 
-        // 5. Sync audit logs
-        try {
-          const logs = await apiRequest("/api/activity-logs");
-          localStorage.setItem(STORAGE_KEYS.LOGS, JSON.stringify(logs));
-        } catch (logsErr) {
-          console.warn("[MockEngine] Failed to sync activity logs:", logsErr);
+        // 5. Sync audit logs (only for authorized faculty or admin users)
+        if (currentRole === "faculty" || currentRole === "admin" || currentRole === "super_admin") {
+          try {
+            const logs = await apiRequest("/api/activity-logs");
+            localStorage.setItem(STORAGE_KEYS.LOGS, JSON.stringify(logs));
+          } catch (logsErr) {
+            console.warn("[MockEngine] Failed to sync activity logs:", logsErr);
+          }
         }
 
         // 6. Sync user notifications (only if authenticated)
@@ -849,22 +852,6 @@ class MockEngine {
     }
   }
 
-  public async checkForDeadlineReminders() {
-    const token = localStorage.getItem("ei_hub_auth_token");
-    if (!token) return;
-    
-    try {
-      await apiRequest("/api/cron/check-reminders", {
-        method: "POST",
-      });
-    } catch (e) {
-      console.error(
-        "[MockEngine] Failed to run deadline reminders check on backend:",
-        e,
-      );
-    }
-  }
-
   // --- STATS OVERVIEW ---
 
   public getSystemStats(): SystemOverviewStats {
@@ -921,3 +908,5 @@ class MockEngine {
 }
 
 export const mockEngine = new MockEngine();
+export const dataService = mockEngine;
+export const syncEngine = mockEngine;

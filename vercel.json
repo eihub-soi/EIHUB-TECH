@@ -1,5 +1,11 @@
 {
   "outputDirectory": "frontend/dist",
+  "crons": [
+    {
+      "path": "/api/cron/check-reminders",
+      "schedule": "0 9 * * *"
+    }
+  ],
   "functions": {
     "api/index.py": {
       "excludeFiles": "{frontend/**,node_modules/**,backend/.venv/**,backend/__pycache__/**,database/**,docker/**,.git/**,.wrangler/**,scripts/**,docs/**,scratch/**,test-results/**,.pytest_cache/**,*.db,*.sqlite}"
