@@ -319,20 +319,30 @@ class D1Client:
         return results[0]
 
     async def batch(self, statements: List[Statement]) -> List[ResultSet]:
-        all_results = []
-        for stmt in statements:
-            payload = {"sql": stmt.sql, "params": stmt.args}
+        if not statements:
+            return []
+        
+        if len(statements) == 1:
+            payload = {"sql": statements[0].sql, "params": statements[0].args}
+        else:
+            combined_sql = "; ".join([stmt.sql.rstrip(";") for stmt in statements]) + ";"
+            combined_args = []
+            for stmt in statements:
+                combined_args.extend(stmt.args)
+            payload = {"sql": combined_sql, "params": combined_args}
+        
+        resp = await self.http_client.post(self.url, headers=self.headers, json=payload)
+        if resp.status_code != 200:
+            print("D1 Error:", resp.text)
+            raise Exception(f"D1 API error: {resp.status_code} {resp.text}")
             
-            resp = await self.http_client.post(self.url, headers=self.headers, json=payload)
-            if resp.status_code != 200:
-                print("D1 Error:", resp.text)
-                raise Exception(f"D1 API error: {resp.status_code} {resp.text}")
-                
-            data = resp.json()
-            if not data.get("success"):
-                raise Exception(f"D1 Query failed: {data.get('errors')}")
-                
-            res = data.get("result", [{}])[0]
+        data = resp.json()
+        if not data.get("success"):
+            raise Exception(f"D1 Query failed: {data.get('errors')}")
+            
+        results = data.get("result", [])
+        all_results = []
+        for res in results:
             if res.get("success") is False:
                 raise Exception(f"D1 Statement failed: {res.get('error')}")
                 
@@ -453,12 +463,16 @@ class SQLiteD1Client:
         return results[0]
 
     async def batch(self, statements: List[Statement]) -> List[ResultSet]:
+        if not statements:
+            return []
+            
         all_results = []
-        for stmt in statements:
-            cursor = self.conn.cursor()
-            sql_str = stmt.sql
-            args = stmt.args or []
-            try:
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute("BEGIN IMMEDIATE TRANSACTION")
+            for stmt in statements:
+                sql_str = stmt.sql
+                args = stmt.args or []
                 cursor.execute(sql_str, args)
                 if sql_str.strip().upper().startswith("SELECT"):
                     d1_rows = cursor.fetchall()
@@ -469,15 +483,15 @@ class SQLiteD1Client:
                         rows = [list(row) for row in d1_rows]
                         all_results.append(ResultSet(columns, rows, 0))
                 else:
-                    self.conn.commit()
                     all_results.append(ResultSet([], [], cursor.rowcount))
-            except Exception as e:
-                self.conn.rollback()
-                print(f"[SQLite Test Error] SQL: {sql_str} | Error: {e}")
-                raise
-            finally:
-                cursor.close()
-        return all_results
+            self.conn.commit()
+            return all_results
+        except Exception as e:
+            self.conn.rollback()
+            print(f"[SQLite Test Error] SQL transaction failed: {e}")
+            raise
+        finally:
+            cursor.close()
 
     async def close(self):
         pass
@@ -536,8 +550,29 @@ async def lifespan(app: FastAPI):
                 reminder_type VARCHAR(255)
             )
         """)
+        await db_execute("""
+            CREATE TABLE IF NOT EXISTS notifications (
+                id VARCHAR(255) PRIMARY KEY,
+                user_id VARCHAR(255),
+                title VARCHAR(255),
+                message TEXT,
+                type VARCHAR(255),
+                is_read INTEGER DEFAULT 0,
+                link_url VARCHAR(255),
+                created_at VARCHAR(255)
+            )
+        """)
+        await db_execute("""
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id VARCHAR(255) PRIMARY KEY,
+                user_id VARCHAR(255),
+                action VARCHAR(255),
+                details TEXT,
+                created_at VARCHAR(255)
+            )
+        """)
         await db_execute("CREATE INDEX IF NOT EXISTS idx_reminder_logs_lookup ON reminder_logs(student_id, reminder_date, reminder_type)")
-        print("[Lifespan] D1 database date indexes and reminder_logs table verified/created successfully.")
+        print("[Lifespan] D1 database date indexes and tables verified/created successfully.")
     except Exception as e:
         print(f"[Lifespan Warning] Could not verify/create D1 indexes/tables: {e}")
     
@@ -995,12 +1030,14 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
         try:
             profile = None
             if email:
-                profile = await db_query("SELECT id, email, full_name, role, firebase_uid FROM profiles WHERE id = ? OR firebase_uid = ? OR (email IS NOT NULL AND LOWER(email) = ?)", [uid, uid, email.strip().lower()])
+                profile = await db_query("SELECT id, email, full_name, role, is_active, firebase_uid FROM profiles WHERE id = ? OR firebase_uid = ? OR (email IS NOT NULL AND LOWER(email) = ?)", [uid, uid, email.strip().lower()])
             else:
-                profile = await db_query("SELECT id, email, full_name, role, firebase_uid FROM profiles WHERE id = ? OR firebase_uid = ?", [uid, uid])
+                profile = await db_query("SELECT id, email, full_name, role, is_active, firebase_uid FROM profiles WHERE id = ? OR firebase_uid = ?", [uid, uid])
 
             if profile:
                 p = profile[0]
+                if p.get("is_active") in (0, False, "0", "false"):
+                    raise HTTPException(status_code=403, detail="Account has been deactivated. Access denied.")
                 if not p.get("firebase_uid") and uid:
                     try:
                         await db_execute("UPDATE profiles SET firebase_uid = ? WHERE id = ?", [uid, p["id"]])
@@ -1011,7 +1048,8 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
                     "uid": p["id"],
                     "email": p["email"],
                     "name": p["full_name"],
-                    "role": user_role
+                    "role": user_role,
+                    "is_active": True
                 }
                 print(f"[Auth] Verified user profile: UID={p['id']}, Email={p['email']}, Role={user_role}")
                 return await cache_and_return(res_dict)
@@ -2179,12 +2217,14 @@ async def delete_profile(
     return {"status": "success", "message": "Profile deleted successfully"}
 
 @app.post("/api/activity-logs")
-async def create_activity_log(log: ActivityLogCreate):
-    log_id = await log_activity(log.user_id, log.user_name, log.action, log.entity_type, log.entity_id, log.details, log.status)
+async def create_activity_log(log: ActivityLogCreate, user: dict = Depends(get_current_user)):
+    if user.get("role") not in ["admin", "super_admin"] and log.user_id != user["uid"]:
+        raise HTTPException(status_code=403, detail="Forbidden: Cannot log activities for other users")
+    log_id = await log_activity(user["uid"], user.get("name", log.user_name), log.action, log.entity_type, log.entity_id, log.details, log.status)
     return {"id": log_id, "status": "success"}
 
 @app.get("/api/activity-logs")
-async def get_activity_logs():
+async def get_activity_logs(user: dict = Depends(require_faculty_or_admin)):
     return list(reversed(in_memory_activity_logs))
 
 @app.get("/api/notifications")
@@ -2198,6 +2238,7 @@ async def get_notifications(user: dict = Depends(get_current_user)):
     return [n for n in reversed(in_memory_notifications) if n["user_id"] == user["uid"]]
 
 @app.post("/api/notifications/{id}/read")
+@app.put("/api/notifications/{id}/read")
 async def read_notification(id: str, user: dict = Depends(get_current_user)):
     try:
         await db_execute("UPDATE notifications SET is_read = 1 WHERE id = ? AND user_id = ?", [id, user["uid"]])
@@ -2209,6 +2250,7 @@ async def read_notification(id: str, user: dict = Depends(get_current_user)):
     return {"status": "success"}
 
 @app.post("/api/notifications/read-all")
+@app.put("/api/notifications/read-all")
 async def read_all_notifications(user: dict = Depends(get_current_user)):
     try:
         await db_execute("UPDATE notifications SET is_read = 1 WHERE user_id = ?", [user["uid"]])
@@ -2365,9 +2407,10 @@ async def delete_purchase_order(po_id: str, user: dict = Depends(require_admin))
 @app.post("/api/cron/check-reminders")
 async def check_reminders(authorization: Optional[str] = Header(None)):
     cron_secret = os.environ.get("CRON_SECRET")
-    if cron_secret:
-        if not authorization or authorization != f"Bearer {cron_secret}":
-            raise HTTPException(status_code=401, detail="Unauthorized cron trigger")
+    if not cron_secret:
+        raise HTTPException(status_code=500, detail="CRON_SECRET configuration missing on server")
+    if not authorization or authorization != f"Bearer {cron_secret}":
+        raise HTTPException(status_code=401, detail="Unauthorized cron trigger")
     # Fetch all approved and unreturned borrow requests with component details
     active_loans = await db_query("""
         SELECT r.*, c.name as component_name, c.sku as component_sku, s.email as student_email, s.full_name as student_name

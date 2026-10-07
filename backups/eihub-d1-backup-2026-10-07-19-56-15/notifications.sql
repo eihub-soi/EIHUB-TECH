@@ -1,0 +1,2 @@
+INSERT INTO notifications ("id", "user_id", "title", "message", "type", "is_read", "link_url", "created_at") VALUES ('notif-db-1', 'stud-db-1', 'Request Approved', 'Your loan for ESP32 was approved', 'success', 0, NULL, '2026-09-10T14:41:00Z');
+INSERT INTO notifications ("id", "user_id", "title", "message", "type", "is_read", "link_url", "created_at") VALUES ('b1ad81aa-fe51-4207-8f59-03aff1a175a5', 'usr-student-1', 'Request Approved', 'Your request for 2x Arduino has been approved.', 'success', 0, '/student/requests', '2026-10-07T14:25:14.362858Z');

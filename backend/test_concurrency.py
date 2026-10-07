@@ -55,24 +55,23 @@ class TestBackendConcurrency(unittest.TestCase):
 
         results = asyncio.run(client.batch(statements))
 
-        # Verify that two HTTP POST requests were made sequentially
-        self.assertEqual(mock_post.call_count, 2)
-        call_args_1, call_kwargs_1 = mock_post.call_args_list[0]
-        call_args_2, call_kwargs_2 = mock_post.call_args_list[1]
+        # Verify that a single HTTP POST request was made containing the array of statements
+        self.assertEqual(mock_post.call_count, 1)
+        call_args, call_kwargs = mock_post.call_args_list[0]
         
-        payload_1 = call_kwargs_1["json"]
-        self.assertEqual(payload_1["sql"], "SELECT * FROM components WHERE id = ?")
-        self.assertEqual(payload_1["params"], ["comp-1"])
-        
-        payload_2 = call_kwargs_2["json"]
-        self.assertEqual(payload_2["sql"], "UPDATE components SET total_stock = ? WHERE id = ?")
-        self.assertEqual(payload_2["params"], [10, "comp-1"])
+        payload = call_kwargs["json"]
+        self.assertTrue(isinstance(payload, dict))
+        self.assertIn("sql", payload)
+        self.assertIn("params", payload)
+        self.assertIn("SELECT * FROM components WHERE id = ?", payload["sql"])
+        self.assertIn("UPDATE components SET total_stock = ? WHERE id = ?", payload["sql"])
+        self.assertEqual(payload["params"], ["comp-1", 10, "comp-1"])
 
         # Verify the returned ResultSets
         self.assertEqual(len(results), 2)
         self.assertEqual(results[0].columns, ["id", "name"])
         self.assertEqual(results[0].rows, [[1, "ESP32"]])
-        self.assertEqual(results[1].rows, [[1, "ESP32"]])
+        self.assertEqual(results[1].rows, [])
 
     @patch("app.main.db_query")
     @patch("app.main.db_batch")

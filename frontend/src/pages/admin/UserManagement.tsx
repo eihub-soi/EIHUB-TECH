@@ -363,7 +363,6 @@ export const UserManagement: React.FC = () => {
               institution: formData.institution,
               year_of_study: formData.year_of_study || null,
               is_active: formData.is_active ? 1 : 0,
-              password: formData.password,
               username: targetUsername,
             });
             if (profileError) {

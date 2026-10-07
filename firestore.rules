@@ -57,11 +57,15 @@ service cloud.firestore {
         isFacultyOrAdmin()
       );
 
-      // New users can create their initial profile document
-      allow create: if isAuthenticated() && (
+      // New users can create their initial profile document (Must be official domain & role student unless created by Admin)
+      allow create: if isAuthenticated() && isOfficialDomain() && (
         request.resource.data.firebase_uid == request.auth.uid ||
         request.resource.data.id == request.auth.uid ||
         isAdmin()
+      ) && (
+        isAdmin() ||
+        request.resource.data.role == "student" ||
+        !('role' in request.resource.data)
       );
 
       // Users can update non-privileged fields on their own profile; Admins can update anything
@@ -99,7 +103,7 @@ service cloud.firestore {
       );
 
       // Students can create requests for themselves with status 'pending'
-      allow create: if isAuthenticated() && (
+      allow create: if isAuthenticated() && isOfficialDomain() && (
         request.resource.data.student_id == request.auth.uid &&
         request.resource.data.status == "pending"
       );

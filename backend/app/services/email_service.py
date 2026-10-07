@@ -9,8 +9,8 @@ async def send_brevo_email(to_email: str, subject: str, html_content: str, attac
     sender_name = os.environ.get("BREVO_SENDER_NAME") or os.environ.get("VITE_BREVO_SENDER_NAME", "EI HUB Support")
     
     if not api_key:
-        print(f"[Brevo Fallback Dev Mode] To: {to_email} | Subject: {subject}")
-        return True
+        print(f"[Brevo Service] API key not configured. Cannot send email to: {to_email}")
+        return False
         
     payload = {
         "sender": {"name": sender_name, "email": sender_email},
@@ -54,8 +54,8 @@ async def send_brevo_email_advanced(to_emails: List[str], subject: str, html_con
     sender_name = os.environ.get("BREVO_SENDER_NAME") or os.environ.get("VITE_BREVO_SENDER_NAME", "EI HUB Support")
     
     if not api_key:
-        print(f"[Brevo Fallback Dev Mode] To: {to_emails} | Subject: {subject}")
-        return True
+        print(f"[Brevo Service] API key not configured. Cannot send email to: {to_emails}")
+        return False
         
     payload = {
         "sender": {"name": sender_name, "email": sender_email},

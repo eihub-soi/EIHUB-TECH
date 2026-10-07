@@ -1,0 +1,22 @@
+[
+  {
+    "id": "notif-db-1",
+    "user_id": "stud-db-1",
+    "title": "Request Approved",
+    "message": "Your loan for ESP32 was approved",
+    "type": "success",
+    "is_read": 0,
+    "link_url": null,
+    "created_at": "2026-09-10T14:41:00Z"
+  },
+  {
+    "id": "b1ad81aa-fe51-4207-8f59-03aff1a175a5",
+    "user_id": "usr-student-1",
+    "title": "Request Approved",
+    "message": "Your request for 2x Arduino has been approved.",
+    "type": "success",
+    "is_read": 0,
+    "link_url": "/student/requests",
+    "created_at": "2026-10-07T14:25:14.362858Z"
+  }
+]

@@ -1,0 +1,60 @@
+{
+  "timestamp": "2026-10-07-19-56-15",
+  "database": "test_database.db",
+  "table_checks": {
+    "profiles": {
+      "row_count": 0,
+      "unique_ids": 0,
+      "duplicate_pks": 0,
+      "null_pks": 0,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    "components": {
+      "row_count": 0,
+      "unique_ids": 0,
+      "duplicate_pks": 0,
+      "null_pks": 0,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    "requests": {
+      "row_count": 0,
+      "unique_ids": 0,
+      "duplicate_pks": 0,
+      "null_pks": 0,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    "purchase_orders": {
+      "row_count": 0,
+      "unique_ids": 0,
+      "duplicate_pks": 0,
+      "null_pks": 0,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    "notifications": {
+      "row_count": 2,
+      "unique_ids": 2,
+      "duplicate_pks": 0,
+      "null_pks": 0,
+      "sha256": "a58c569a8150156e6588e9718c2ef568ec4255c77513fb5bfe39eb91dc2ee4e1"
+    },
+    "reminder_logs": {
+      "row_count": 0,
+      "unique_ids": 0,
+      "duplicate_pks": 0,
+      "null_pks": 0,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    },
+    "audit_logs": {
+      "row_count": 0,
+      "unique_ids": 0,
+      "duplicate_pks": 0,
+      "null_pks": 0,
+      "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    }
+  },
+  "stock_totals": {
+    "sum_total_stock": 0,
+    "sum_available_stock": 0,
+    "sum_borrowed_stock": 0
+  }
+}
