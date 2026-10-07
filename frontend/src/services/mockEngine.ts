@@ -56,22 +56,12 @@ class MockEngine {
           "[MockEngine] Synchronizing datasets with Python Backend...",
         );
 
-        // 1. Sync components
-        const comps = await apiRequest("/api/components");
-        localStorage.setItem(STORAGE_KEYS.COMPONENTS, JSON.stringify(comps));
-
-        // 2. Sync borrow requests
-        const reqs = await apiRequest("/api/requests");
-        localStorage.setItem(STORAGE_KEYS.REQUESTS, JSON.stringify(reqs));
-
-        // 3. Sync purchase orders
-        const purchases = await apiRequest("/api/purchase-orders");
-        localStorage.setItem(STORAGE_KEYS.PURCHASES, JSON.stringify(purchases));
-
-        // 4. Sync current user profile
+        // 1. Sync current user profile first to determine authorization role
+        let currentRole = "";
         try {
           const profile = await apiRequest("/api/profiles");
           if (profile && profile.id) {
+            currentRole = profile.role ? String(profile.role).toLowerCase() : "";
             const list = this.getProfiles();
             const idx = list.findIndex((p) => p.id === profile.id);
             if (idx !== -1) {
@@ -85,9 +75,39 @@ class MockEngine {
           console.warn("[MockEngine] Failed to sync current user profile:", e);
         }
 
+        // 2. Sync components
+        try {
+          const comps = await apiRequest("/api/components");
+          localStorage.setItem(STORAGE_KEYS.COMPONENTS, JSON.stringify(comps));
+        } catch (compErr) {
+          console.warn("[MockEngine] Failed to sync components:", compErr);
+        }
+
+        // 3. Sync borrow requests
+        try {
+          const reqs = await apiRequest("/api/requests");
+          localStorage.setItem(STORAGE_KEYS.REQUESTS, JSON.stringify(reqs));
+        } catch (reqErr) {
+          console.warn("[MockEngine] Failed to sync requests:", reqErr);
+        }
+
+        // 4. Sync purchase orders (only for authorized admin users)
+        if (currentRole === "admin" || currentRole === "super_admin") {
+          try {
+            const purchases = await apiRequest("/api/purchase-orders");
+            localStorage.setItem(STORAGE_KEYS.PURCHASES, JSON.stringify(purchases));
+          } catch (poErr) {
+            console.warn("[MockEngine] Failed to sync purchase orders:", poErr);
+          }
+        }
+
         // 5. Sync audit logs
-        const logs = await apiRequest("/api/activity-logs");
-        localStorage.setItem(STORAGE_KEYS.LOGS, JSON.stringify(logs));
+        try {
+          const logs = await apiRequest("/api/activity-logs");
+          localStorage.setItem(STORAGE_KEYS.LOGS, JSON.stringify(logs));
+        } catch (logsErr) {
+          console.warn("[MockEngine] Failed to sync activity logs:", logsErr);
+        }
 
         // 6. Sync user notifications (only if authenticated)
         if (
@@ -837,7 +857,6 @@ class MockEngine {
       await apiRequest("/api/cron/check-reminders", {
         method: "POST",
       });
-      await this.syncWithD1();
     } catch (e) {
       console.error(
         "[MockEngine] Failed to run deadline reminders check on backend:",

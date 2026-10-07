@@ -993,34 +993,60 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
         
         # Pull profile details from database if possible
         try:
-            profile = await db_query("SELECT id, email, full_name, role FROM profiles WHERE id = ? OR firebase_uid = ?", [uid, uid])
+            profile = None
+            if email:
+                profile = await db_query("SELECT id, email, full_name, role, firebase_uid FROM profiles WHERE id = ? OR firebase_uid = ? OR (email IS NOT NULL AND LOWER(email) = ?)", [uid, uid, email.strip().lower()])
+            else:
+                profile = await db_query("SELECT id, email, full_name, role, firebase_uid FROM profiles WHERE id = ? OR firebase_uid = ?", [uid, uid])
+
             if profile:
+                p = profile[0]
+                if not p.get("firebase_uid") and uid:
+                    try:
+                        await db_execute("UPDATE profiles SET firebase_uid = ? WHERE id = ?", [uid, p["id"]])
+                    except Exception:
+                        pass
+                user_role = (p.get("role") or "student").strip().lower()
                 res_dict = {
-                    "uid": profile[0]["id"],
-                    "email": profile[0]["email"],
-                    "name": profile[0]["full_name"],
-                    "role": profile[0]["role"]
+                    "uid": p["id"],
+                    "email": p["email"],
+                    "name": p["full_name"],
+                    "role": user_role
                 }
+                print(f"[Auth] Verified user profile: UID={p['id']}, Email={p['email']}, Role={user_role}")
                 return await cache_and_return(res_dict)
             else:
                 # Create profile if missing
                 default_role = "student"
-                
-                # Assume DB has created_at column natively or we just insert required fields
-                await db_execute(
-                    "INSERT INTO profiles (id, firebase_uid, email, full_name, role) VALUES (?, ?, ?, ?, ?)",
-                    [uid, uid, email, name, default_role]
-                )
-                
+                try:
+                    await db_execute(
+                        "INSERT INTO profiles (id, firebase_uid, email, full_name, role) VALUES (?, ?, ?, ?, ?)",
+                        [uid, uid, email, name, default_role]
+                    )
+                except Exception as ins_e:
+                    print(f"[Auth] Profile insert attempt noted, re-checking: {ins_e}")
+                    if email:
+                        re_profile = await db_query("SELECT id, email, full_name, role FROM profiles WHERE id = ? OR firebase_uid = ? OR (email IS NOT NULL AND LOWER(email) = ?)", [uid, uid, email.strip().lower()])
+                        if re_profile:
+                            rp = re_profile[0]
+                            res_dict = {
+                                "uid": rp["id"],
+                                "email": rp["email"],
+                                "name": rp["full_name"],
+                                "role": (rp.get("role") or "student").strip().lower()
+                            }
+                            return await cache_and_return(res_dict)
+
                 res_dict = {
                     "uid": uid,
                     "email": email,
                     "name": name,
                     "role": default_role
                 }
+                print(f"[Auth] Created new user profile: UID={uid}, Email={email}, Role={default_role}")
                 return await cache_and_return(res_dict)
         except Exception as db_e:
-            print(f"Error querying/inserting profile: {db_e}")
+            print(f"[Auth Error] Error querying profile: {db_e}")
             res_dict = {
                 "uid": uid,
                 "email": email,
@@ -1042,7 +1068,7 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
                         "uid": p["id"],
                         "email": p["email"],
                         "name": p["full_name"],
-                        "role": p["role"]
+                        "role": (p.get("role") or "student").strip().lower()
                     }
                     return await cache_and_return(res_dict)
             except Exception:
@@ -1050,12 +1076,14 @@ async def get_current_user(credentials: Optional[HTTPAuthorizationCredentials] =
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 async def require_admin(user: dict = Depends(get_current_user)) -> Dict[str, Any]:
-    if user.get("role") not in ["admin", "super_admin"]:
+    role = (user.get("role") or "").strip().lower()
+    if role not in ["admin", "super_admin"]:
         raise HTTPException(status_code=403, detail="Admin privileges required")
     return user
 
 async def require_faculty_or_admin(user: dict = Depends(get_current_user)) -> Dict[str, Any]:
-    if user.get("role") not in ["faculty", "admin", "super_admin"]:
+    role = (user.get("role") or "").strip().lower()
+    if role not in ["faculty", "admin", "super_admin"]:
         raise HTTPException(status_code=403, detail="Faculty or Admin privileges required")
     return user
 
