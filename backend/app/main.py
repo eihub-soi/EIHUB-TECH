@@ -3019,7 +3019,7 @@ async def generate_report_pdf_bytes(
                 dt = datetime.strptime(d_str, "%Y-%m-%d")
                 return dt.strftime("%d %b %Y")
             except Exception:
-                return str(d_str)
+                return d_str
         if f_date and t_date:
             return f"{format_single_date(f_date)} – {format_single_date(t_date)}"
         elif f_date:
