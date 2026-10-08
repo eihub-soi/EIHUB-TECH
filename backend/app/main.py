@@ -3015,8 +3015,11 @@ async def generate_report_pdf_bytes(
     # Helper to format range text
     def format_date_range(f_date: Optional[str], t_date: Optional[str]) -> str:
         def format_single_date(d_str: str) -> str:
-            dt = datetime.strptime(d_str, "%Y-%m-%d")
-            return dt.strftime("%d %b %Y")
+            try:
+                dt = datetime.strptime(d_str, "%Y-%m-%d")
+                return dt.strftime("%d %b %Y")
+            except Exception:
+                return str(d_str)
         if f_date and t_date:
             return f"{format_single_date(f_date)} – {format_single_date(t_date)}"
         elif f_date:
@@ -3032,21 +3035,16 @@ async def generate_report_pdf_bytes(
 
     # Data preparation
     date_range = format_date_range(from_date, to_date)
-    generated_by = user.get("name", "Admin")
-    stats = {} # Handled dynamically inside Node.js generator
-    print(f"[Timing] Data preparation completion: {time.time() - start_time:.4f}s")
+    generated_by = user.get("name") or user.get("full_name") or user.get("email") or "Admin"
+    stats = {}
 
-    # Call PDF Generator inside ThreadPool to prevent event-loop freezing
-    if report_type == "Inventory Report":
-        pdf_bytes = await asyncio.to_thread(generate_inventory_report_pdf, components, requests, stats, date_range, generated_by, from_date, to_date)
-    elif report_type == "Low Stock Alert":
-        pdf_bytes = await asyncio.to_thread(generate_low_stock_report_pdf, components, requests, stats, date_range, generated_by, from_date, to_date)
-    elif report_type == "Monthly Summary":
-        pdf_bytes = await asyncio.to_thread(generate_monthly_report_pdf, components, requests, stats, date_range, generated_by, from_date, to_date)
-    elif report_type == "Transaction Log" or report_type == "Transaction Report":
-        pdf_bytes = await asyncio.to_thread(generate_transaction_report_pdf, components, requests, stats, date_range, generated_by, from_date, to_date)
-    else:
-        pdf_bytes = await asyncio.to_thread(generate_inventory_report_pdf, components, requests, stats, date_range, generated_by, from_date, to_date)
+    pdf_bytes = await asyncio.to_thread(
+        generate_inventory_report_pdf if "inventory" in (report_type or "").lower()
+        else generate_low_stock_report_pdf if "low stock" in (report_type or "").lower()
+        else generate_monthly_report_pdf if "monthly" in (report_type or "").lower()
+        else generate_transaction_report_pdf,
+        components, requests, stats, date_range, generated_by, from_date, to_date
+    )
         
     print(f"[Timing] PDF generation completion: {time.time() - start_time:.4f}s")
     return pdf_bytes
@@ -3059,9 +3057,13 @@ async def preview_report_pdf(
     user: dict = Depends(require_faculty_or_admin)
 ):
     start_time = time.time()
-    print(f"[Timing] [PDF] API request start")
+    user_uid = user.get("uid") or user.get("id") or "unknown"
+    user_role = user.get("role") or "unknown"
+    print(f"[PDF Request] User: {user_uid} ({user_role}) | reportType: '{reportType}' | from: {from_date} | to: {to_date}")
+
     if user.get("role") not in ["admin", "super_admin", "faculty"]:
-        raise HTTPException(status_code=403, detail="Forbidden")
+        print(f"[PDF Auth Warning] User {user_uid} with role '{user_role}' denied access.")
+        raise HTTPException(status_code=403, detail="Forbidden: Admin or Faculty privileges required")
         
     try:
         pdf_bytes = await generate_report_pdf_bytes(reportType, user, from_date, to_date, start_time)
@@ -3069,8 +3071,13 @@ async def preview_report_pdf(
         response = Response(content=pdf_bytes, media_type="application/pdf")
         response.headers["Content-Disposition"] = f"inline; filename=preview.pdf"
         return response
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        import traceback
+        print(f"[PDF ERROR] Exception during PDF preview for reportType '{reportType}': {e}")
+        print(f"[PDF ERROR TRACEBACK]\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="An error occurred while generating the PDF preview.")
 
 @app.get("/api/admin/reports/download-csv")
 async def download_report_csv(

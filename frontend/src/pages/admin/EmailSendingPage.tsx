@@ -580,7 +580,14 @@ export const EmailSendingPage: React.FC = () => {
               type: "pdf",
             });
           } else {
-            console.error("Failed to fetch PDF preview blob");
+            let errDetail = `HTTP ${res.status}`;
+            try {
+              const errData = await res.json();
+              errDetail = errData.detail || errDetail;
+            } catch {
+              /* ignore JSON parse error */
+            }
+            console.error(`Failed to fetch PDF preview blob (${errDetail})`);
           }
         } catch (err) {
           console.error("Failed to prepare PDF attachment:", err);
