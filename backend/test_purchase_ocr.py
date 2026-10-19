@@ -198,6 +198,31 @@ class TestPurchaseOCR(unittest.TestCase):
         self.assertEqual(po_inserts[0].args[1], "PO-12345")
         self.assertEqual(po_inserts[0].args[11], "INV-2026-9876")
 
+    @patch("app.api.routes.import_data.db_query")
+    @patch("app.api.routes.import_data.db_batch")
+    @patch("app.api.routes.import_data.log_activity")
+    def test_purchases_import_confirm_endpoint(self, mock_log, mock_batch, mock_db_query):
+        mock_db_query.return_value = []
+        payload = {
+            "metadata": {
+                "supplier_name": "ABC Electronics",
+                "invoice_number": "INV-2026-9876",
+                "grand_total": 1200.0,
+                "po_number": "PO-12345"
+            },
+            "line_items": [
+                {
+                    "item_name": "New Sensor Module",
+                    "quantity": 10,
+                    "unit_price": 120.0,
+                    "category": "Sensors"
+                }
+            ]
+        }
+        response = self.client.post("/api/purchases/import/confirm", json=payload)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["success"])
+
     def test_parse_ocr_coordinates(self):
         from app.api.routes.import_data import parse_ocr_coordinates
         

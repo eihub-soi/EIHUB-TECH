@@ -1773,3 +1773,22 @@ async def confirm_purchase(req: PurchaseConfirmRequest, user=Depends(require_adm
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Transaction Failed: {str(e)}")
 
+async def purchase_confirm(
+    req: Optional[PurchaseConfirmRequest] = None,
+    data: Optional[Dict[str, Any]] = None,
+    user: Optional[Dict[str, Any]] = None,
+    **kwargs
+):
+    """
+    Convenience wrapper for confirm_purchase that accepts either a PurchaseConfirmRequest or a dict.
+    """
+    if req is None:
+        payload = data if data is not None else kwargs
+        req = PurchaseConfirmRequest(
+            metadata=payload.get("metadata", {}),
+            line_items=payload.get("line_items", [])
+        )
+    current_user = user or kwargs.get("user", {})
+    return await confirm_purchase(req=req, user=current_user)
+
+
