@@ -43,6 +43,7 @@ class TestSecurityHardening(unittest.TestCase):
                     roll_number VARCHAR(255),
                     year_of_study VARCHAR(255),
                     faculty_id VARCHAR(255),
+                    username VARCHAR(255),
                     is_active INTEGER DEFAULT 1,
                     created_at VARCHAR(255),
                     updated_at VARCHAR(255)
@@ -465,6 +466,87 @@ class TestSecurityHardening(unittest.TestCase):
             res_csv = self.client.get("/api/admin/reports/download-csv?from_date=2026-01-01&to_date=2026-01-31")
             self.assertEqual(res_csv.status_code, 200)
             self.assertTrue(res_csv.content.startswith(b'\xef\xbb\xbf'))  # utf-8-sig BOM
+
+    def test_admin_sql_query_authorization(self):
+        # 1. Unauthenticated request must return 401
+        app.dependency_overrides.clear()
+        res_unauth = self.client.post("/api/query", json={"sql": "SELECT 1"})
+        self.assertEqual(res_unauth.status_code, 401)
+
+        # 2. Student session must return 403
+        self.mock_user["role"] = "student"
+        app.dependency_overrides[get_current_user] = lambda: self.mock_user
+        res_student = self.client.post("/api/query", json={"sql": "SELECT 1"})
+        self.assertEqual(res_student.status_code, 403)
+        self.assertIn("Admin privileges required", res_student.json()["detail"])
+
+        # 3. Faculty session must return 403
+        self.mock_user["role"] = "faculty"
+        res_faculty = self.client.post("/api/query", json={"sql": "SELECT 1"})
+        self.assertEqual(res_faculty.status_code, 403)
+        self.assertIn("Admin privileges required", res_faculty.json()["detail"])
+
+        # 4. Admin session succeeds
+        self.mock_user["role"] = "admin"
+        res_admin = self.client.post("/api/query", json={"sql": "SELECT 1 as val", "args": []})
+        self.assertEqual(res_admin.status_code, 200)
+        data = res_admin.json()
+        self.assertIsNone(data["error"])
+        self.assertEqual(data["data"][0]["val"], 1)
+
+    def test_profiles_sync_flow_and_privilege_escalation(self):
+        # 1. Unauthenticated caller returns 401
+        app.dependency_overrides.clear()
+        res_unauth = self.client.post("/api/profiles/sync", json={"full_name": "Ghost"})
+        self.assertEqual(res_unauth.status_code, 401)
+
+        # 2. Student user syncing profile with full fields
+        self.mock_user["uid"] = "usr-sync-1"
+        self.mock_user["id"] = "usr-sync-1"
+        self.mock_user["email"] = "syncstudent@kgkite.ac.in"
+        self.mock_user["role"] = "student"
+        app.dependency_overrides[get_current_user] = lambda: self.mock_user
+
+        sync_payload = {
+            "id": "usr-sync-1",
+            "firebase_uid": "usr-sync-1",
+            "email": "syncstudent@kgkite.ac.in",
+            "full_name": "Synchronized Student",
+            "department": "ECE",
+            "phone": "+91 99887 76655",
+            "register_number": "711721104001",
+            "roll_number": "21EC001",
+            "institution": "KGiSL",
+            "year_of_study": "III",
+            "role": "admin"  # Attempted privilege escalation!
+        }
+
+        res = self.client.post("/api/profiles/sync", json=sync_payload)
+        self.assertEqual(res.status_code, 200)
+        profile = res.json()
+
+        # Verify profile was returned properly
+        self.assertEqual(profile["id"], "usr-sync-1")
+        self.assertEqual(profile["full_name"], "Synchronized Student")
+        self.assertEqual(profile["department"], "ECE")
+        self.assertEqual(profile["phone"], "+91 99887 76655")
+        self.assertEqual(profile["register_number"], "711721104001")
+        # Privilege escalation must be stopped: role remains student
+        self.assertEqual(profile["role"], "student")
+
+        # 3. Update existing profile with new details
+        update_payload = {
+            "id": "usr-sync-1",
+            "full_name": "Updated Synchronized Student",
+            "phone": "+91 99887 76656",
+            "role": "faculty"  # Again attempt privilege escalation
+        }
+        res_update = self.client.post("/api/profiles/sync", json=update_payload)
+        self.assertEqual(res_update.status_code, 200)
+        updated_profile = res_update.json()
+        self.assertEqual(updated_profile["full_name"], "Updated Synchronized Student")
+        self.assertEqual(updated_profile["phone"], "+91 99887 76656")
+        self.assertEqual(updated_profile["role"], "student")
 
 if __name__ == "__main__":
     unittest.main()

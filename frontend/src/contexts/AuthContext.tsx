@@ -50,6 +50,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
 
   // Load saved user from localStorage if authenticated
   const getSavedUser = (): Profile | null => {
+    const token = localStorage.getItem("ei_hub_auth_token");
+    if (!token && !mockEngine.isMockEnabled()) {
+      return null;
+    }
     const savedId = localStorage.getItem("ei_hub_active_user_id");
     if (savedId) {
       const savedProfileStr = localStorage.getItem(
@@ -62,8 +66,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
           // ignore
         }
       }
-      const found = demoProfiles.find((p) => p.id === savedId);
-      if (found) return found;
+      if (mockEngine.isMockEnabled()) {
+        const found = demoProfiles.find((p) => p.id === savedId);
+        if (found) return found;
+      }
     }
     return null;
   };
@@ -159,8 +165,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
               // Ignore profile query error
             }
 
-            // Local fallback if FastAPI query failed
-            if (!profile && !controller.signal.aborted) {
+            // Local fallback if FastAPI query failed (only in mock mode)
+            if (!profile && !controller.signal.aborted && mockEngine.isMockEnabled()) {
               const localProfiles = mockEngine.getProfiles();
               profile =
                 localProfiles.find(
@@ -206,6 +212,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
             if (isMountedRef.current) {
               setUser(null);
               localStorage.removeItem("ei_hub_auth_token");
+              localStorage.removeItem("ei_hub_active_user_id");
+              localStorage.removeItem("ei_hub_active_user_profile");
+              localStorage.removeItem("ei_hub_profiles_v2");
+              localStorage.removeItem("d1_auth_session");
             }
           }
         } catch {
@@ -651,7 +661,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
           );
         }
 
-        if (!profile) {
+        if (!profile && mockEngine.isMockEnabled()) {
           const localProfiles = mockEngine.getProfiles();
           const newLocalProfile = {
             id: newProfileId,
@@ -717,6 +727,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     localStorage.removeItem("ei_hub_auth_token");
     localStorage.removeItem("ei_hub_active_user_id");
     localStorage.removeItem("ei_hub_active_user_profile");
+    localStorage.removeItem("ei_hub_profiles_v2");
+    localStorage.removeItem("d1_auth_session");
   };
 
   useEffect(() => {
