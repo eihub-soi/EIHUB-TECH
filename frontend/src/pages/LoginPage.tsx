@@ -4,6 +4,7 @@ import { useAuth } from '../contexts/AuthContext';
 import { mockEngine } from '../services/mockEngine';
 import { UserRole } from '../types';
 import { toast } from 'sonner';
+import { apiRequest } from '../utils/api';
 import { useEscapeKey } from '../hooks/useEscapeKey';
 
 import { auth as firebaseAuth, db as firestoreDb, isFirebaseConfigured, firebaseConfig } from '../firebase/client';
@@ -276,9 +277,46 @@ export const LoginPage: React.FC = () => {
         // Sign up with Firebase Auth
         const userCredential = await createUserWithEmailAndPassword(firebaseAuth, regEmail, regPassword);
         if (userCredential.user) {
-          const profileId = crypto.randomUUID();
+          const profileId = userCredential.user.uid;
 
-          // 1. Insert profile record in Firebase Firestore if configured
+          // 1. Authoritative write to backend SQLite/D1 database via /api/profiles/sync
+          try {
+            const token = await userCredential.user.getIdToken();
+            localStorage.setItem('ei_hub_auth_token', token);
+
+            await apiRequest('/api/profiles/sync', {
+              method: 'POST',
+              body: JSON.stringify({
+                id: profileId,
+                firebase_uid: userCredential.user.uid,
+                email: regEmail,
+                full_name: regFullName,
+                role: 'student',
+                department: regDepartment,
+                phone: regPhone,
+                register_number: regRegisterNumber,
+                roll_number: regRollNumber,
+                institution: regInstitution,
+                year_of_study: regYear,
+                username: regUsername
+              }),
+              headers: {
+                Authorization: `Bearer ${token}`
+              }
+            });
+            console.log('[LoginPage] Successfully saved profile to authoritative database');
+          } catch (syncErr: any) {
+            console.error('[LoginPage] Failed to persist profile to D1 backend:', syncErr);
+            try {
+              await userCredential.user.delete();
+              localStorage.removeItem('ei_hub_auth_token');
+            } catch (delErr) {
+              console.warn('[LoginPage] Failed to rollback Firebase account:', delErr);
+            }
+            throw new Error('Registration failed: Could not persist profile in authoritative database. Please try again.');
+          }
+
+          // 2. Insert profile record in Firebase Firestore if configured (secondary store)
           if (firestoreDb) {
             try {
               await setDoc(doc(firestoreDb, 'profiles', profileId), {

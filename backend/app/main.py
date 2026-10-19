@@ -161,13 +161,18 @@ async def check_redis_rate_limit(key: str, limit: int, window: int) -> Optional[
 # ENVIRONMENT VARIABLES & VALIDATION
 # ----------------------------------------------------
 startup_error = None
-required_env_vars = [
-    "CLOUDFLARE_ACCOUNT_ID",
-    "CLOUDFLARE_API_TOKEN",
-    "CLOUDFLARE_D1_DATABASE_ID",
-]
+cf_acc_id = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
+cf_api_tok = os.environ.get("CLOUDFLARE_API_TOKEN")
+cf_database_id = os.environ.get("CLOUDFLARE_D1_DATABASE_ID") or os.environ.get("CLOUDFLARE_DATABASE_ID")
 
-missing_vars = [var for var in required_env_vars if not os.environ.get(var)]
+missing_vars = []
+if not cf_acc_id:
+    missing_vars.append("CLOUDFLARE_ACCOUNT_ID")
+if not cf_api_tok:
+    missing_vars.append("CLOUDFLARE_API_TOKEN")
+if not cf_database_id:
+    missing_vars.append("CLOUDFLARE_D1_DATABASE_ID (or CLOUDFLARE_DATABASE_ID)")
+
 if missing_vars:
     startup_error = f"Missing required environment variables: {', '.join(missing_vars)}"
     print(f"Startup Warning: {startup_error}")
@@ -267,7 +272,7 @@ firebase_initialized = ensure_firebase_initialized()
 # Connect to Cloudflare D1 Database
 CF_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID")
 CF_API_TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN")
-CF_DB_ID = os.environ.get("CLOUDFLARE_D1_DATABASE_ID")
+CF_DB_ID = os.environ.get("CLOUDFLARE_D1_DATABASE_ID") or os.environ.get("CLOUDFLARE_DATABASE_ID")
 
 class Statement:
     def __init__(self, sql: str, args: Optional[list] = None):
@@ -2216,8 +2221,95 @@ async def get_current_user_profile(
         raise HTTPException(status_code=500, detail="Internal server error while fetching profile")
 
 @app.post("/api/profiles/sync")
-async def sync_profile(data: dict = Body(...), user: dict = Depends(get_current_user)):
-    return {"status": "success", "message": "Profiles sync is deprecated in favor of Firebase directly, or just handled here"}
+async def sync_profile(data: dict = Body(...), current_user: dict = Depends(get_current_user)):
+    user_id = current_user.get("uid")
+    user_email = (current_user.get("email") or "").strip().lower()
+    user_role = (current_user.get("role") or "student").strip().lower()
+    is_admin = user_role in ["admin", "super_admin"]
+
+    # Security constraint: non-admins cannot sync profile for someone else
+    target_id = data.get("id") or user_id
+    target_firebase_uid = data.get("firebase_uid") or user_id
+    if not is_admin and (target_id != user_id and target_firebase_uid != user_id):
+        target_id = user_id
+        target_firebase_uid = user_id
+
+    # Security constraint: prevent privilege escalation
+    incoming_role = (data.get("role") or "student").strip().lower()
+    if not is_admin:
+        role_to_set = "student"
+    else:
+        role_to_set = incoming_role if incoming_role in ["student", "faculty", "admin", "super_admin"] else "student"
+
+    full_name = data.get("full_name") or current_user.get("name") or "User"
+    email = user_email or (data.get("email") or "").strip().lower()
+    department = data.get("department") or "Electronics & Communication Engineering"
+    phone = data.get("phone") or data.get("mobile_number") or ""
+    register_number = data.get("register_number")
+    roll_number = data.get("roll_number")
+    institution = data.get("institution") or "KGiSL Institute of Technology"
+    year_of_study = data.get("year_of_study")
+    username = data.get("username") or email
+    now_str = datetime.now(timezone.utc).isoformat()
+
+    # Query if profile exists by ID, firebase_uid, or email
+    existing_rows = await db_query(
+        "SELECT * FROM profiles WHERE id = ? OR firebase_uid = ? OR (email IS NOT NULL AND LOWER(email) = ?)",
+        [target_id, target_firebase_uid, email]
+    )
+
+    if existing_rows:
+        existing = existing_rows[0]
+        actual_id = existing["id"]
+        # Non-admins preserve their existing verified role
+        final_role = existing.get("role") if not is_admin else role_to_set
+
+        await db_execute(
+            """
+            UPDATE profiles
+            SET full_name = COALESCE(?, full_name),
+                department = COALESCE(?, department),
+                phone = COALESCE(?, phone),
+                register_number = COALESCE(?, register_number),
+                roll_number = COALESCE(?, roll_number),
+                institution = COALESCE(?, institution),
+                year_of_study = COALESCE(?, year_of_study),
+                username = COALESCE(?, username),
+                firebase_uid = COALESCE(?, firebase_uid),
+                updated_at = ?
+            WHERE id = ?
+            """,
+            [full_name, department, phone, register_number, roll_number, institution, year_of_study, username, target_firebase_uid, now_str, actual_id]
+        )
+        updated_rows = await db_query("SELECT * FROM profiles WHERE id = ?", [actual_id])
+        return clean_row("profiles", updated_rows[0] if updated_rows else existing)
+    else:
+        await db_execute(
+            """
+            INSERT INTO profiles (
+                id, firebase_uid, email, full_name, role, department, phone,
+                register_number, roll_number, institution, year_of_study,
+                username, is_active, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            """,
+            [
+                target_id, target_firebase_uid, email, full_name, role_to_set, department, phone,
+                register_number, roll_number, institution, year_of_study,
+                username, now_str, now_str
+            ]
+        )
+        new_rows = await db_query("SELECT * FROM profiles WHERE id = ?", [target_id])
+        if not new_rows:
+            new_rows = await db_query("SELECT * FROM profiles WHERE firebase_uid = ?", [target_firebase_uid])
+        
+        fallback_profile = {
+            "id": target_id, "firebase_uid": target_firebase_uid, "email": email,
+            "full_name": full_name, "role": role_to_set, "department": department,
+            "phone": phone, "register_number": register_number, "roll_number": roll_number,
+            "institution": institution, "year_of_study": year_of_study, "username": username,
+            "is_active": True
+        }
+        return clean_row("profiles", new_rows[0] if new_rows else fallback_profile)
 
 @app.get("/api/profiles/{id}")
 async def get_profile_by_id(id: str, current_user: dict = Depends(get_current_user)):
