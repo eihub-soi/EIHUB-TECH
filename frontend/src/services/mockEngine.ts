@@ -233,113 +233,139 @@ class MockEngine {
     });
   }
 
-  public addComponent(
+  public async addComponent(
     comp: Omit<
       ComponentItem,
       "id" | "created_at" | "updated_at" | "borrowed_stock" | "available_stock"
     > & { available_stock?: number },
-  ): ComponentItem {
-    const list = this.getComponents();
-    const newComp: ComponentItem = {
-      ...comp,
-      id: crypto.randomUUID(),
-      available_stock: comp.available_stock ?? comp.total_stock,
-      borrowed_stock: 0,
-      sku: `COMP-${crypto.randomUUID().substring(0, 4).toUpperCase()}`,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
-    list.unshift(newComp);
-    localStorage.setItem(STORAGE_KEYS.COMPONENTS, JSON.stringify(list));
-
-    apiRequest("/api/components", {
-      method: "POST",
-      body: JSON.stringify(comp),
-    })
-      .then(() => this.syncWithD1())
-      .catch((err) =>
-        console.error("[MockEngine] Failed to save component to backend:", err),
-      );
-
-    this.notify();
-    return newComp;
-  }
-
-  public updateComponent(id: string, formData: Partial<ComponentItem>) {
-    const list = this.getComponents();
-    const idx = list.findIndex((c) => c.id === id);
-    if (idx !== -1) {
-      list[idx] = {
-        ...list[idx],
-        ...formData,
+  ): Promise<ComponentItem> {
+    const token = localStorage.getItem("ei_hub_auth_token");
+    if (!token && this.isMockEnabled()) {
+      const list = this.getComponents();
+      const newComp: ComponentItem = {
+        ...comp,
+        id: crypto.randomUUID(),
+        available_stock: comp.available_stock ?? comp.total_stock,
+        borrowed_stock: 0,
+        sku: `COMP-${crypto.randomUUID().substring(0, 4).toUpperCase()}`,
+        created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
-      } as ComponentItem;
+      };
+      list.unshift(newComp);
       localStorage.setItem(STORAGE_KEYS.COMPONENTS, JSON.stringify(list));
+      this.notify();
+      return newComp;
     }
 
-    apiRequest(`/api/components/${id}`, {
+    // 1. Authoritative: Send to backend server first
+    const created = await apiRequest("/api/components", {
+      method: "POST",
+      body: JSON.stringify(comp),
+    });
+
+    // 2. Commit and refresh from D1
+    await this.syncWithD1(true);
+    this.notify();
+
+    const comps = this.getComponents();
+    const found = comps.find((c) => c.id === created?.id || c.name === comp.name);
+    return (
+      found || {
+        ...comp,
+        id: created?.id || crypto.randomUUID(),
+        available_stock: comp.available_stock ?? comp.total_stock,
+        borrowed_stock: 0,
+        sku: `COMP-${crypto.randomUUID().substring(0, 4).toUpperCase()}`,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }
+    );
+  }
+
+  public async updateComponent(
+    id: string,
+    formData: Partial<ComponentItem>,
+  ): Promise<void> {
+    const token = localStorage.getItem("ei_hub_auth_token");
+    if (!token && this.isMockEnabled()) {
+      const list = this.getComponents();
+      const idx = list.findIndex((c) => c.id === id);
+      if (idx !== -1) {
+        list[idx] = {
+          ...list[idx],
+          ...formData,
+          updated_at: new Date().toISOString(),
+        } as ComponentItem;
+        localStorage.setItem(STORAGE_KEYS.COMPONENTS, JSON.stringify(list));
+      }
+      this.notify();
+      return;
+    }
+
+    // 1. Authoritative server update
+    await apiRequest(`/api/components/${id}`, {
       method: "PUT",
       body: JSON.stringify(formData),
-    })
-      .then(() => this.syncWithD1())
-      .catch((err) =>
-        console.error(
-          "[MockEngine] Failed to update component on backend:",
-          err,
-        ),
-      );
+    });
 
+    // 2. Commit and refresh from D1
+    await this.syncWithD1(true);
     this.notify();
   }
 
-  public deleteComponent(id: string) {
-    let list = this.getComponents();
-    list = list.filter((c) => c.id !== id);
-    localStorage.setItem(STORAGE_KEYS.COMPONENTS, JSON.stringify(list));
+  public async deleteComponent(id: string): Promise<void> {
+    const token = localStorage.getItem("ei_hub_auth_token");
+    if (!token && this.isMockEnabled()) {
+      let list = this.getComponents();
+      list = list.filter((c) => c.id !== id);
+      localStorage.setItem(STORAGE_KEYS.COMPONENTS, JSON.stringify(list));
+      this.notify();
+      return;
+    }
 
-    apiRequest(`/api/components/${id}`, {
+    // 1. Authoritative server delete
+    await apiRequest(`/api/components/${id}`, {
       method: "DELETE",
-    })
-      .then(() => this.syncWithD1())
-      .catch((err) =>
-        console.error(
-          "[MockEngine] Failed to delete component from backend:",
-          err,
-        ),
-      );
+    });
 
+    // 2. Commit and refresh from D1
+    await this.syncWithD1(true);
     this.notify();
   }
 
-  public restockComponent(
+  public async restockComponent(
     componentId: string,
     quantity: number,
     userId: string,
-  ) {
-    const comps = this.getComponents();
-    const comp = comps.find((c) => c.id === componentId);
-    if (comp) {
-      comp.total_stock += quantity;
-      comp.available_stock += quantity;
-      comp.updated_at = new Date().toISOString();
-      localStorage.setItem(STORAGE_KEYS.COMPONENTS, JSON.stringify(comps));
+  ): Promise<void> {
+    const comp = this.getComponents().find((c) => c.id === componentId);
+    if (!comp) throw new Error("Component not found");
 
-      apiRequest(`/api/components/${componentId}`, {
-        method: "PUT",
-        body: JSON.stringify({
-          ...comp,
-          total_stock: comp.total_stock,
-          available_stock: comp.available_stock,
-        }),
-      })
-        .then(() => this.syncWithD1())
-        .catch((err) =>
-          console.error(
-            "[MockEngine] Failed to restock component on backend:",
-            err,
-          ),
-        );
+    const newTotal = comp.total_stock + quantity;
+    const newAvail = comp.available_stock + quantity;
+
+    const token = localStorage.getItem("ei_hub_auth_token");
+    if (!token && this.isMockEnabled()) {
+      comp.total_stock = newTotal;
+      comp.available_stock = newAvail;
+      comp.updated_at = new Date().toISOString();
+      const comps = this.getComponents().map((c) => (c.id === componentId ? comp : c));
+      localStorage.setItem(STORAGE_KEYS.COMPONENTS, JSON.stringify(comps));
+      this.notify();
+      return;
     }
+
+    // Authoritative server update
+    await apiRequest(`/api/components/${componentId}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        ...comp,
+        total_stock: newTotal,
+        available_stock: newAvail,
+      }),
+    });
+
+    await this.syncWithD1(true);
     this.notify();
   }
 
@@ -349,65 +375,69 @@ class MockEngine {
     return data ? JSON.parse(data) : (this.isMockEnabled() ? INITIAL_REQUESTS : []);
   }
 
-  public submitBorrowRequest(
+  public async submitBorrowRequest(
     studentId: string,
     componentId: string,
     quantity: number,
     purpose: string,
     days: number = 14,
-  ): BorrowRequest {
-    const comps = this.getComponents();
-    const comp = comps.find((c) => c.id === componentId);
-    const student = this.getProfiles().find((p) => p.id === studentId);
+  ): Promise<BorrowRequest> {
+    const token = localStorage.getItem("ei_hub_auth_token");
+    if (!token && this.isMockEnabled()) {
+      const comp = this.getComponents().find((c) => c.id === componentId);
+      const student = this.getProfiles().find((p) => p.id === studentId);
 
-    const existingReqs = this.getRequests();
-    let maxNum = 0;
-    existingReqs.forEach((r) => {
-      if (r.request_code && r.request_code.startsWith("REQ-")) {
-        const numPart = parseInt(r.request_code.substring(4), 10);
-        if (!isNaN(numPart) && numPart > maxNum) {
-          maxNum = numPart;
+      const existingReqs = this.getRequests();
+      let maxNum = 0;
+      existingReqs.forEach((r) => {
+        if (r.request_code && r.request_code.startsWith("REQ-")) {
+          const numPart = parseInt(r.request_code.substring(4), 10);
+          if (!isNaN(numPart) && numPart > maxNum) {
+            maxNum = numPart;
+          }
         }
-      }
-    });
-    const reqCode = `REQ-${maxNum + 1}`;
-    const newReq: BorrowRequest = {
-      id: crypto.randomUUID(),
-      request_code: reqCode,
-      student_id: studentId,
-      student_name: student?.full_name || "N/A",
-      student_register_no: student?.register_number || "N/A",
-      student_email: student?.email || "N/A",
-      component_id: componentId,
-      component_name: comp?.name || "N/A",
-      component_category: comp?.category || "Others",
-      component_image: comp?.image_url,
-      quantity,
-      purpose,
-      status: "pending",
-      approved_by: undefined,
-      approved_by_name: "",
-      rejection_reason: "",
-      requested_at: new Date().toISOString(),
-      approved_at: undefined,
-      expected_return_at: new Date(
-        Date.now() + days * 24 * 60 * 60 * 1000,
-      ).toISOString(),
-      return_requested_at: undefined,
-      returned_at: undefined,
-      return_condition: "Good / Fully Functional",
-      return_description: "",
-      return_missing_details: "",
-      return_damaged_details: "",
-      return_remarks: "",
-      created_at: new Date().toISOString(),
-    };
+      });
+      const reqCode = `REQ-${maxNum + 1}`;
+      const newReq: BorrowRequest = {
+        id: crypto.randomUUID(),
+        request_code: reqCode,
+        student_id: studentId,
+        student_name: student?.full_name || "N/A",
+        student_register_no: student?.register_number || "N/A",
+        student_email: student?.email || "N/A",
+        component_id: componentId,
+        component_name: comp?.name || "N/A",
+        component_category: comp?.category || "Others",
+        component_image: comp?.image_url,
+        quantity,
+        purpose,
+        status: "pending",
+        approved_by: undefined,
+        approved_by_name: "",
+        rejection_reason: "",
+        requested_at: new Date().toISOString(),
+        approved_at: undefined,
+        expected_return_at: new Date(
+          Date.now() + days * 24 * 60 * 60 * 1000,
+        ).toISOString(),
+        return_requested_at: undefined,
+        returned_at: undefined,
+        return_condition: "Good / Fully Functional",
+        return_description: "",
+        return_missing_details: "",
+        return_damaged_details: "",
+        return_remarks: "",
+        created_at: new Date().toISOString(),
+      };
 
-    const requests = this.getRequests();
-    requests.unshift(newReq);
-    localStorage.setItem(STORAGE_KEYS.REQUESTS, JSON.stringify(requests));
+      existingReqs.unshift(newReq);
+      localStorage.setItem(STORAGE_KEYS.REQUESTS, JSON.stringify(existingReqs));
+      this.notify();
+      return newReq;
+    }
 
-    apiRequest("/api/requests/submit", {
+    // 1. Authoritative: Submit to backend server first
+    const serverRes = await apiRequest("/api/requests/submit", {
       method: "POST",
       body: JSON.stringify({
         student_id: studentId,
@@ -415,172 +445,205 @@ class MockEngine {
         quantity,
         notes: purpose,
       }),
-    })
-      .then(() => this.syncWithD1())
-      .catch((err) =>
-        console.error("[MockEngine] Failed to submit request to backend:", err),
-      );
+    });
 
+    // 2. Commit and refresh authoritative datasets from D1
+    await this.syncWithD1(true);
     this.notify();
-    return newReq;
+
+    const currentReqs = this.getRequests();
+    const createdReq = currentReqs.find((r) => r.id === serverRes?.id);
+    if (createdReq) return createdReq;
+
+    return {
+      id: serverRes?.id || crypto.randomUUID(),
+      request_code: serverRes?.code || "REQ-NEW",
+      student_id: studentId,
+      student_name: "",
+      student_register_no: "",
+      student_email: "",
+      component_id: componentId,
+      component_name: "",
+      component_category: "",
+      quantity,
+      purpose,
+      status: "pending",
+      requested_at: new Date().toISOString(),
+      expected_return_at: new Date(
+        Date.now() + days * 24 * 60 * 60 * 1000,
+      ).toISOString(),
+      created_at: new Date().toISOString(),
+    };
   }
 
-  public approveBorrowRequest(
+  public async approveBorrowRequest(
     requestId: string,
     facultyId: string,
     remark?: string,
-  ): BorrowRequest {
+  ): Promise<BorrowRequest> {
     const requests = this.getRequests();
     const req = requests.find((r) => r.id === requestId);
     if (!req) throw new Error("Request not found");
 
-    req.status = "approved";
-    req.approved_by = facultyId;
-    req.approved_at = new Date().toISOString();
-    req.rejection_reason = remark || "";
-    localStorage.setItem(STORAGE_KEYS.REQUESTS, JSON.stringify(requests));
+    const token = localStorage.getItem("ei_hub_auth_token");
+    if (!token && this.isMockEnabled()) {
+      req.status = "approved";
+      req.approved_by = facultyId;
+      req.approved_at = new Date().toISOString();
+      req.rejection_reason = remark || "";
+      localStorage.setItem(STORAGE_KEYS.REQUESTS, JSON.stringify(requests));
 
-    // Deduct local component stock
-    const comps = this.getComponents();
-    const comp = comps.find((c) => c.id === req.component_id);
-    if (comp) {
-      comp.available_stock = Math.max(0, comp.available_stock - req.quantity);
-      comp.borrowed_stock += req.quantity;
-      localStorage.setItem(STORAGE_KEYS.COMPONENTS, JSON.stringify(comps));
+      // Deduct local component stock
+      const comps = this.getComponents();
+      const comp = comps.find((c) => c.id === req.component_id);
+      if (comp) {
+        comp.available_stock = Math.max(0, comp.available_stock - req.quantity);
+        comp.borrowed_stock += req.quantity;
+        localStorage.setItem(STORAGE_KEYS.COMPONENTS, JSON.stringify(comps));
+      }
+      this.notify();
+      return req;
     }
 
-    // Build PDF client-side and send base64 to backend for email attachment
-    const processApproval = async () => {
-      let pdfBase64 = "";
-      try {
-        const doc = await generateStudentReceiptPdf(req, false);
-        pdfBase64 = doc.output("datauristring").split(",")[1];
-      } catch (pdfErr) {
-        console.warn(
-          "[MockEngine] Failed to generate PDF for email attachment:",
-          pdfErr,
-        );
-      }
+    // Build PDF client-side for email attachment
+    let pdfBase64 = "";
+    try {
+      const doc = await generateStudentReceiptPdf(req, false);
+      pdfBase64 = doc.output("datauristring").split(",")[1];
+    } catch (pdfErr) {
+      console.warn(
+        "[MockEngine] Failed to generate PDF for email attachment:",
+        pdfErr,
+      );
+    }
 
-      apiRequest(`/api/requests/${requestId}/approve`, {
-        method: "POST",
-        body: JSON.stringify({
-          reviewed_by: facultyId,
-          notes: remark,
-          pdf_base64: pdfBase64 || undefined,
-        }),
-      })
-        .then(() => this.syncWithD1())
-        .catch((err) =>
-          console.error(
-            "[MockEngine] Failed to approve request on backend:",
-            err,
-          ),
-        );
-    };
+    // 1. Authoritative: Send to backend server
+    await apiRequest(`/api/requests/${requestId}/approve`, {
+      method: "POST",
+      body: JSON.stringify({
+        reviewed_by: facultyId,
+        notes: remark,
+        pdf_base64: pdfBase64 || undefined,
+      }),
+    });
 
-    processApproval();
-
+    // 2. Commit and refresh from D1
+    await this.syncWithD1(true);
     this.notify();
-    return req;
+
+    const updated = this.getRequests().find((r) => r.id === requestId);
+    return updated || { ...req, status: "approved" };
   }
 
-  public rejectBorrowRequest(
+  public async rejectBorrowRequest(
     requestId: string,
     facultyId: string,
     reason: string,
-  ): BorrowRequest {
+  ): Promise<BorrowRequest> {
     const requests = this.getRequests();
     const req = requests.find((r) => r.id === requestId);
     if (!req) throw new Error("Request not found");
 
-    req.status = "rejected";
-    req.rejection_reason = reason;
-    localStorage.setItem(STORAGE_KEYS.REQUESTS, JSON.stringify(requests));
+    const token = localStorage.getItem("ei_hub_auth_token");
+    if (!token && this.isMockEnabled()) {
+      req.status = "rejected";
+      req.rejection_reason = reason;
+      localStorage.setItem(STORAGE_KEYS.REQUESTS, JSON.stringify(requests));
+      this.notify();
+      return req;
+    }
 
-    apiRequest(`/api/requests/${requestId}/reject`, {
+    // 1. Authoritative server call
+    await apiRequest(`/api/requests/${requestId}/reject`, {
       method: "POST",
       body: JSON.stringify({
         reviewed_by: facultyId,
         reject_reason: reason,
       }),
-    })
-      .then(() => this.syncWithD1())
-      .catch((err) =>
-        console.error("[MockEngine] Failed to reject request on backend:", err),
-      );
+    });
 
+    // 2. Commit and refresh from D1
+    await this.syncWithD1(true);
     this.notify();
-    return req;
+
+    const updated = this.getRequests().find((r) => r.id === requestId);
+    return updated || { ...req, status: "rejected", rejection_reason: reason };
   }
 
-  public requestReturnComponent(
+  public async requestReturnComponent(
     requestId: string,
     studentId: string,
     condition: string,
     description: string,
-  ) {
+  ): Promise<void> {
     const requests = this.getRequests();
     const req = requests.find((r) => r.id === requestId);
     if (!req) throw new Error("Request not found");
 
-    req.return_requested_at = new Date().toISOString();
-    req.return_condition = condition;
-    req.return_description = description;
-    localStorage.setItem(STORAGE_KEYS.REQUESTS, JSON.stringify(requests));
+    const token = localStorage.getItem("ei_hub_auth_token");
+    if (!token && this.isMockEnabled()) {
+      req.return_requested_at = new Date().toISOString();
+      req.return_condition = condition;
+      req.return_description = description;
+      localStorage.setItem(STORAGE_KEYS.REQUESTS, JSON.stringify(requests));
+      this.notify();
+      return;
+    }
 
-    apiRequest(`/api/requests/${requestId}/return-request`, {
+    // 1. Authoritative server call
+    await apiRequest(`/api/requests/${requestId}/return-request`, {
       method: "POST",
       body: JSON.stringify({
         student_id: studentId,
         condition,
         description,
       }),
-    })
-      .then(() => this.syncWithD1())
-      .catch((err) =>
-        console.error(
-          "[MockEngine] Failed to submit return request to backend:",
-          err,
-        ),
-      );
+    });
 
+    // 2. Commit and refresh from D1
+    await this.syncWithD1(true);
     this.notify();
   }
 
-  public processReturnComponent(
+  public async processReturnComponent(
     requestId: string,
     facultyId: string,
     condition: string,
     missingDetails: string,
     damagedDetails: string,
     remarks: string,
-  ) {
+  ): Promise<void> {
     const requests = this.getRequests();
     const req = requests.find((r) => r.id === requestId);
     if (!req) throw new Error("Request not found");
 
-    req.status = "returned";
-    req.returned_at = new Date().toISOString();
-    req.return_condition = condition;
-    req.return_remarks = remarks;
-    req.return_missing_details = missingDetails;
-    req.return_damaged_details = damagedDetails;
-    localStorage.setItem(STORAGE_KEYS.REQUESTS, JSON.stringify(requests));
+    const token = localStorage.getItem("ei_hub_auth_token");
+    if (!token && this.isMockEnabled()) {
+      req.status = "returned";
+      req.returned_at = new Date().toISOString();
+      req.return_condition = condition;
+      req.return_remarks = remarks;
+      req.return_missing_details = missingDetails;
+      req.return_damaged_details = damagedDetails;
+      localStorage.setItem(STORAGE_KEYS.REQUESTS, JSON.stringify(requests));
 
-    // Restore stock locally
-    const comps = this.getComponents();
-    const comp = comps.find((c) => c.id === req.component_id);
-    if (comp) {
-      comp.available_stock = Math.min(
-        comp.total_stock,
-        comp.available_stock + req.quantity,
-      );
-      comp.borrowed_stock = Math.max(0, comp.borrowed_stock - req.quantity);
-      localStorage.setItem(STORAGE_KEYS.COMPONENTS, JSON.stringify(comps));
+      // Restore stock locally
+      const comps = this.getComponents();
+      const comp = comps.find((c) => c.id === req.component_id);
+      if (comp) {
+        comp.available_stock = Math.min(
+          comp.total_stock,
+          comp.available_stock + req.quantity,
+        );
+        comp.borrowed_stock = Math.max(0, comp.borrowed_stock - req.quantity);
+        localStorage.setItem(STORAGE_KEYS.COMPONENTS, JSON.stringify(comps));
+      }
+      this.notify();
+      return;
     }
 
-    apiRequest(`/api/requests/${requestId}/return-process`, {
+    // 1. Authoritative server call
+    await apiRequest(`/api/requests/${requestId}/return-process`, {
       method: "POST",
       body: JSON.stringify({
         reviewed_by: facultyId,
@@ -590,12 +653,10 @@ class MockEngine {
         missing_details: missingDetails,
         damaged_details: damagedDetails,
       }),
-    })
-      .then(() => this.syncWithD1())
-      .catch((err) =>
-        console.error("[MockEngine] Failed to process return on backend:", err),
-      );
+    });
 
+    // 2. Commit and refresh from D1
+    await this.syncWithD1(true);
     this.notify();
   }
 
@@ -605,78 +666,94 @@ class MockEngine {
     return data ? JSON.parse(data) : (this.isMockEnabled() ? INITIAL_PROFILES : []);
   }
 
-  public addProfile(
+  public async addProfile(
     profile: Omit<Profile, "id" | "created_at" | "updated_at"> & {
       id?: string;
     },
     password?: string,
-  ): Profile {
-    const list = this.getProfiles();
-    const newProfile: Profile = {
+  ): Promise<Profile> {
+    const token = localStorage.getItem("ei_hub_auth_token");
+    if (!token && this.isMockEnabled()) {
+      const list = this.getProfiles();
+      const newProfile: Profile = {
+        ...profile,
+        id: profile.id || crypto.randomUUID(),
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      } as Profile;
+      list.push(newProfile);
+      localStorage.setItem(STORAGE_KEYS.PROFILES, JSON.stringify(list));
+      this.notify();
+      return newProfile;
+    }
+
+    const payload = {
       ...profile,
       id: profile.id || crypto.randomUUID(),
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    } as Profile;
-    list.push(newProfile);
-    localStorage.setItem(STORAGE_KEYS.PROFILES, JSON.stringify(list));
+      password: password,
+    };
 
-    apiRequest("/api/profiles/sync", {
+    await apiRequest("/api/profiles/sync", {
       method: "POST",
-      body: JSON.stringify({
-        ...newProfile,
-        password: password,
-      }),
-    })
-      .then(() => this.syncWithD1())
-      .catch((err) =>
-        console.error("[MockEngine] Failed to add profile to backend:", err),
-      );
+      body: JSON.stringify(payload),
+    });
 
+    await this.syncWithD1(true);
     this.notify();
-    return newProfile;
+
+    const created = this.getProfiles().find((p) => p.email === profile.email);
+    return (
+      created || {
+        ...profile,
+        id: payload.id,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }
+    );
   }
 
   public async updateProfile(
     id: string,
     formData: Partial<Profile>,
   ): Promise<void> {
-    const list = this.getProfiles();
-    const idx = list.findIndex((p) => p.id === id);
-    if (idx !== -1) {
-      list[idx] = {
-        ...list[idx],
-        ...formData,
-        updated_at: new Date().toISOString(),
-      } as Profile;
-      localStorage.setItem(STORAGE_KEYS.PROFILES, JSON.stringify(list));
+    const token = localStorage.getItem("ei_hub_auth_token");
+    if (!token && this.isMockEnabled()) {
+      const list = this.getProfiles();
+      const idx = list.findIndex((p) => p.id === id);
+      if (idx !== -1) {
+        list[idx] = {
+          ...list[idx],
+          ...formData,
+          updated_at: new Date().toISOString(),
+        } as Profile;
+        localStorage.setItem(STORAGE_KEYS.PROFILES, JSON.stringify(list));
+      }
+      this.notify();
+      return;
     }
 
-    try {
-      await apiRequest(`/api/profiles/${id}`, {
-        method: "PUT",
-        body: JSON.stringify(formData),
-      });
-      await this.syncWithD1();
-    } catch (err) {
-      console.error("[MockEngine] Failed to update profile on backend:", err);
-    }
+    await apiRequest(`/api/profiles/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(formData),
+    });
+    await this.syncWithD1(true);
     this.notify();
   }
 
   public async deleteProfile(id: string): Promise<void> {
-    let list = this.getProfiles();
-    list = list.filter((p) => p.id !== id);
-    localStorage.setItem(STORAGE_KEYS.PROFILES, JSON.stringify(list));
-
-    try {
-      await apiRequest(`/api/profiles/${id}`, {
-        method: "DELETE",
-      });
-      await this.syncWithD1();
-    } catch (err) {
-      console.error("[MockEngine] Failed to delete profile on backend:", err);
+    const token = localStorage.getItem("ei_hub_auth_token");
+    if (!token && this.isMockEnabled()) {
+      let list = this.getProfiles();
+      list = list.filter((p) => p.id !== id);
+      localStorage.setItem(STORAGE_KEYS.PROFILES, JSON.stringify(list));
+      this.notify();
+      return;
     }
+
+    await apiRequest(`/api/profiles/${id}`, {
+      method: "DELETE",
+    });
+    await this.syncWithD1(true);
     this.notify();
   }
 
@@ -686,90 +763,99 @@ class MockEngine {
     return data ? JSON.parse(data) : [];
   }
 
-  public addPurchaseOrder(
+  public async addPurchaseOrder(
     poData: Omit<
       PurchaseOrder,
       "id" | "po_number" | "status" | "purchased_at" | "created_at"
     >,
-  ): PurchaseOrder {
-    const purchases = this.getPurchases();
-    const poNumber = `PO-2026-${Math.floor(1000 + Math.random() * 9000)}`;
-    const newPO: PurchaseOrder = {
-      ...poData,
-      id: crypto.randomUUID(),
-      po_number: poNumber,
-      status: "delivered",
-      purchased_at: new Date().toISOString(),
-      created_at: new Date().toISOString(),
-    };
-    purchases.unshift(newPO);
-    localStorage.setItem(STORAGE_KEYS.PURCHASES, JSON.stringify(purchases));
+  ): Promise<PurchaseOrder> {
+    const token = localStorage.getItem("ei_hub_auth_token");
+    if (!token && this.isMockEnabled()) {
+      const purchases = this.getPurchases();
+      const poNumber = `PO-2026-${Math.floor(1000 + Math.random() * 9000)}`;
+      const newPO: PurchaseOrder = {
+        ...poData,
+        id: crypto.randomUUID(),
+        po_number: poNumber,
+        status: "delivered",
+        purchased_at: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+      };
+      purchases.unshift(newPO);
+      localStorage.setItem(STORAGE_KEYS.PURCHASES, JSON.stringify(purchases));
+      this.notify();
+      return newPO;
+    }
 
-    apiRequest("/api/purchase-orders", {
+    // 1. Authoritative: Send to server first
+    const res = await apiRequest("/api/purchase-orders", {
       method: "POST",
       body: JSON.stringify(poData),
-    })
-      .then(() => this.syncWithD1())
-      .catch((err) =>
-        console.error(
-          "[MockEngine] Failed to save purchase order to backend:",
-          err,
-        ),
-      );
+    });
 
+    // 2. Commit and refresh from D1
+    await this.syncWithD1(true);
     this.notify();
-    return newPO;
+
+    const currentPOs = this.getPurchases();
+    const createdPO = currentPOs.find((p) => p.id === res?.id);
+    return (
+      createdPO || {
+        ...poData,
+        id: res?.id || crypto.randomUUID(),
+        po_number: res?.po_number || "PO-NEW",
+        status: "delivered",
+        purchased_at: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+      }
+    );
   }
 
   public async updatePurchaseOrder(
     id: string,
     poData: Partial<PurchaseOrder>,
   ): Promise<void> {
-    const list = this.getPurchases();
-    const idx = list.findIndex((p) => p.id === id);
-    if (idx !== -1) {
-      list[idx] = {
-        ...list[idx],
-        ...poData,
-        total_cost:
-          (poData.quantity ?? list[idx].quantity) *
-          (poData.unit_cost ?? list[idx].unit_cost),
-        updated_at: new Date().toISOString(),
-      } as PurchaseOrder;
-      localStorage.setItem(STORAGE_KEYS.PURCHASES, JSON.stringify(list));
+    const token = localStorage.getItem("ei_hub_auth_token");
+    if (!token && this.isMockEnabled()) {
+      const list = this.getPurchases();
+      const idx = list.findIndex((p) => p.id === id);
+      if (idx !== -1) {
+        list[idx] = {
+          ...list[idx],
+          ...poData,
+          total_cost:
+            (poData.quantity ?? list[idx].quantity) *
+            (poData.unit_cost ?? list[idx].unit_cost),
+          updated_at: new Date().toISOString(),
+        } as PurchaseOrder;
+        localStorage.setItem(STORAGE_KEYS.PURCHASES, JSON.stringify(list));
+      }
+      this.notify();
+      return;
     }
 
-    try {
-      await apiRequest(`/api/purchase-orders/${id}`, {
-        method: "PUT",
-        body: JSON.stringify(poData),
-      });
-      await this.syncWithD1();
-    } catch (err) {
-      console.error(
-        "[MockEngine] Failed to update purchase order on backend:",
-        err,
-      );
-    }
+    await apiRequest(`/api/purchase-orders/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(poData),
+    });
+    await this.syncWithD1(true);
     this.notify();
   }
 
   public async deletePurchaseOrder(id: string): Promise<void> {
-    const list = this.getPurchases();
-    const filtered = list.filter((p) => p.id !== id);
-    localStorage.setItem(STORAGE_KEYS.PURCHASES, JSON.stringify(filtered));
-
-    try {
-      await apiRequest(`/api/purchase-orders/${id}`, {
-        method: "DELETE",
-      });
-      await this.syncWithD1();
-    } catch (err) {
-      console.error(
-        "[MockEngine] Failed to delete purchase order on backend:",
-        err,
-      );
+    const token = localStorage.getItem("ei_hub_auth_token");
+    if (!token && this.isMockEnabled()) {
+      const list = this.getPurchases();
+      const filtered = list.filter((p) => p.id !== id);
+      localStorage.setItem(STORAGE_KEYS.PURCHASES, JSON.stringify(filtered));
+      this.notify();
+      return;
     }
+
+    await apiRequest(`/api/purchase-orders/${id}`, {
+      method: "DELETE",
+    });
+    await this.syncWithD1(true);
     this.notify();
   }
 

@@ -100,14 +100,14 @@ export const InventoryManagement: React.FC = () => {
     setShowAddModal(true);
   };
 
-  const handleSaveComponent = (e: React.FormEvent) => {
+  const handleSaveComponent = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
       if (editingComp) {
-        mockEngine.updateComponent(editingComp.id, formData);
+        await mockEngine.updateComponent(editingComp.id, formData);
         toast.success(`Updated ${formData.name}`);
       } else {
-        mockEngine.addComponent(formData);
+        await mockEngine.addComponent(formData);
         toast.success(`Added new component: ${formData.name}`);
       }
       setComponents(mockEngine.getComponents());
@@ -117,19 +117,23 @@ export const InventoryManagement: React.FC = () => {
     }
   };
 
-  const handleDeleteComponent = (id: string, name: string) => {
+  const handleDeleteComponent = async (id: string, name: string) => {
     if (confirm(`Are you sure you want to delete ${name} from inventory?`)) {
-      mockEngine.deleteComponent(id);
-      toast.success(`Deleted ${name}`);
-      setComponents(mockEngine.getComponents());
+      try {
+        await mockEngine.deleteComponent(id);
+        toast.success(`Deleted ${name}`);
+        setComponents(mockEngine.getComponents());
+      } catch (err: any) {
+        toast.error(err.message || "Failed to delete component");
+      }
     }
   };
 
-  const handleConfirmRestock = (e: React.FormEvent) => {
+  const handleConfirmRestock = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!restockComp) return;
     try {
-      mockEngine.restockComponent(
+      await mockEngine.restockComponent(
         restockComp.id,
         restockQty,
         user?.id || "usr-faculty-1",

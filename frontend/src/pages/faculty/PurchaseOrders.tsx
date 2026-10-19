@@ -135,7 +135,7 @@ export const PurchaseOrders: React.FC = () => {
     }
   };
 
-  const handleCreatePurchaseSubmit = (e: React.FormEvent) => {
+  const handleCreatePurchaseSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
     let compName = customComponentName;
@@ -150,7 +150,7 @@ export const PurchaseOrders: React.FC = () => {
     }
 
     try {
-      mockEngine.addPurchaseOrder({
+      await mockEngine.addPurchaseOrder({
         component_id:
           selectedComponentId === "custom" ? "" : selectedComponentId,
         component_name: compName,

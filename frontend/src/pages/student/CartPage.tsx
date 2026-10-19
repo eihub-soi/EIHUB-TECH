@@ -32,7 +32,7 @@ export const CartPage: React.FC = () => {
   const [projectDescription, setProjectDescription] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleSubmitRequest = (e: React.FormEvent) => {
+  const handleSubmitRequest = async (e: React.FormEvent) => {
     e.preventDefault();
     if (cart.length === 0 || !user) return;
 
@@ -80,9 +80,9 @@ export const CartPage: React.FC = () => {
       };
 
       let submittedCount = 0;
-      cart.forEach((item) => {
+      for (const item of cart) {
         const fullPurpose = `Project Purpose: ${purpose}\nFrom Date: ${fromDate}\nTo Date: ${toDate}\nTo Time: ${formatTimeTo12Hour(toTime)}\nProject Guide: ${projectGuide}\nDescription: ${projectDescription}`;
-        mockEngine.submitBorrowRequest(
+        await mockEngine.submitBorrowRequest(
           user.id,
           item.component.id,
           item.quantity,
@@ -90,7 +90,7 @@ export const CartPage: React.FC = () => {
           days,
         );
         submittedCount++;
-      });
+      }
 
       toast.success(
         `Successfully submitted borrowing requests for ${submittedCount} components to ${projectGuide}!`,

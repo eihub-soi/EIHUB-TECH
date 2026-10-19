@@ -305,7 +305,7 @@ export const LoginPage: React.FC = () => {
         }
       } else {
         // Create new student profile in mockEngine
-        const newStudent = mockEngine.addProfile({
+        const newStudent = await mockEngine.addProfile({
           email: regEmail,
           full_name: regFullName,
           role: 'student',

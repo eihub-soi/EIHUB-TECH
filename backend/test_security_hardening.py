@@ -17,6 +17,8 @@ from app.main import app, get_current_user, require_admin, require_faculty_or_ad
 class TestSecurityHardening(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
+        from app.main import RATE_LIMIT_REQUESTS
+        RATE_LIMIT_REQUESTS.clear()
         
         # In-memory database setup for tests
         import asyncio
@@ -390,6 +392,12 @@ class TestSecurityHardening(unittest.TestCase):
         res_replay = self.client.post("/api/auth/otp/verify", json={"email": email, "code": "789123"})
         self.assertEqual(res_replay.status_code, 400)
         self.assertIn("no active verification code", res_replay.json()["detail"].lower())
+
+    def test_send_otp_db_failure_fails_closed(self):
+        with patch("app.main.db_execute", side_effect=Exception("D1 connection lost")):
+            res = self.client.post("/api/auth/otp", json={"email": "fail-db@kgkite.ac.in", "code": "123456"})
+            self.assertEqual(res.status_code, 500)
+            self.assertIn("Database persistence failed", res.json()["detail"])
 
     def test_inventory_invariants_enforcement(self):
         self.mock_user["role"] = "admin"

@@ -129,14 +129,14 @@ export const FacultyDashboard: React.FC = () => {
   const components = mockEngine.getComponents();
   const totalCategories = new Set(components.map((c) => c.category)).size;
 
-  const handleApprove = (reqId: string) => {
+  const handleApprove = async (reqId: string) => {
     const remark = prompt(
       "Enter approval remark/notes (optional):",
       "Approved for project use",
     );
     if (remark === null) return;
     try {
-      mockEngine.approveBorrowRequest(
+      await mockEngine.approveBorrowRequest(
         reqId,
         user?.id || "usr-faculty-1",
         remark,
@@ -148,14 +148,14 @@ export const FacultyDashboard: React.FC = () => {
     }
   };
 
-  const handleReject = (reqId: string) => {
+  const handleReject = async (reqId: string) => {
     const reason = prompt(
       "Enter rejection reason for student:",
       "Stock allocated for advanced lab session",
     );
     if (reason !== null) {
       try {
-        mockEngine.rejectBorrowRequest(
+        await mockEngine.rejectBorrowRequest(
           reqId,
           user?.id || "usr-faculty-1",
           reason,

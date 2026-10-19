@@ -10,6 +10,7 @@ import time
 import httpx
 import base64
 import hashlib
+import hmac
 import secrets
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta, date
@@ -100,47 +101,24 @@ google_keys_lock = asyncio.Lock()
 RATE_LIMIT_REQUESTS = defaultdict(list)
 RATE_LIMIT_MAX_REQUESTS = 100  # Max requests per window
 RATE_LIMIT_WINDOW = 60         # Window size in seconds
+_LAST_RATE_LIMIT_CLEANUP = 0.0
 
-# Periodic cleanup task for rate limiting memory leak (run lock-free and coroutine-safe)
-async def cleanup_rate_limits():
-    while True:
-        try:
-            await asyncio.sleep(120)  # Prune every 2 minutes
-            now = time.time()
-            ips = list(RATE_LIMIT_REQUESTS.keys())
-            for ip in ips:
-                ts = RATE_LIMIT_REQUESTS.get(ip, [])
-                valid_ts = [t for t in ts if now - t < RATE_LIMIT_WINDOW]
-                if not valid_ts:
-                    RATE_LIMIT_REQUESTS.pop(ip, None)
-                else:
-                    RATE_LIMIT_REQUESTS[ip] = valid_ts
-        except (asyncio.CancelledError, RuntimeError):
-            break
-        except Exception:
-            break
+def prune_expired_rate_limits():
+    """Inline lazy prune for memory safety on serverless platforms without background daemons"""
+    global _LAST_RATE_LIMIT_CLEANUP
+    now = time.time()
+    if now - _LAST_RATE_LIMIT_CLEANUP < 60:
+        return
+    _LAST_RATE_LIMIT_CLEANUP = now
+    ips = list(RATE_LIMIT_REQUESTS.keys())
+    for ip in ips:
+        ts = RATE_LIMIT_REQUESTS.get(ip, [])
+        valid_ts = [t for t in ts if now - t < RATE_LIMIT_WINDOW]
+        if not valid_ts:
+            RATE_LIMIT_REQUESTS.pop(ip, None)
+        else:
+            RATE_LIMIT_REQUESTS[ip] = valid_ts
 
-# Asynchronous Background Email Queue & Workers
-EMAIL_QUEUE = asyncio.Queue()
-
-async def email_worker():
-    while True:
-        try:
-            to_email, subject, html, attachment = await EMAIL_QUEUE.get()
-            try:
-                await send_brevo_email(to_email, subject, html, attachment)
-            except Exception as e:
-                print(f"[Email Worker] Failed to send email to {to_email}: {e}")
-            finally:
-                EMAIL_QUEUE.task_done()
-        except (asyncio.CancelledError, RuntimeError):
-            break
-        except Exception as e:
-            print(f"[Email Worker] Loop error: {e}")
-            try:
-                await asyncio.sleep(1)
-            except (asyncio.CancelledError, RuntimeError):
-                break
 
 # Distributed Upstash Redis Rate Limiting Helper
 async def check_redis_rate_limit(key: str, limit: int, window: int) -> Optional[bool]:
@@ -639,22 +617,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[Lifespan Warning] Could not verify/create D1 indexes/tables: {e}")
     
-    # Start background cleanup task
-    cleanup_task = asyncio.create_task(cleanup_rate_limits())
-    
-    # Start background email workers
-    email_tasks = [asyncio.create_task(email_worker()) for _ in range(3)]
-    
     yield
-    
-    # Cancel background tasks cleanly
-    cleanup_task.cancel()
-    for task in email_tasks:
-        task.cancel()
-    try:
-        await asyncio.gather(cleanup_task, *email_tasks, return_exceptions=True)
-    except Exception:
-        pass
         
     global client
     if client:
@@ -719,6 +682,9 @@ async def security_headers_middleware(request: Request, call_next):
 # Per-IP Sliding Window Rate Limiting Middleware
 @app.middleware("http")
 async def rate_limit_middleware(request: Request, call_next):
+    # Lazy inline rate-limit cleanup to maintain bounded memory on serverless
+    prune_expired_rate_limits()
+
     # Exclude API documentation and standard schema endpoints from limit
     if request.url.path in ["/docs", "/redoc", "/openapi.json"]:
         return await call_next(request)
@@ -1370,8 +1336,8 @@ async def get_firebase_reset_link(req: ResetLinkRequest):
             
         return generic_response
     except Exception as e:
-        print(f"Error handling password reset request: {e}")
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        print(f"[Password Reset Error] Failed to handle request: {e}")
+        return JSONResponse(status_code=400, content={"error": "Failed to process password reset request."})
 
 # Global fetches tracking dictionary for request coalescing
 ACTIVE_FETCHES = {}
@@ -1425,7 +1391,8 @@ async def send_otp(data: dict = Body(...)):
             [otp_id, email_clean, otp_hash, expires_at, 0, 0, created_at]
         )
     except Exception as dbe:
-        print(f"[OTP Warning] Could not persist OTP to database: {dbe}")
+        print(f"[OTP Error] Failed to persist OTP to database: {dbe}")
+        raise HTTPException(status_code=500, detail="Database persistence failed. Could not generate verification OTP.")
         
     html = f"""
     <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; padding: 25px; border: 1px solid #e2e8f0; border-radius: 16px; background-color: #ffffff;">
@@ -1438,8 +1405,18 @@ async def send_otp(data: dict = Body(...)):
     </div>
     """
     # Directly dispatch email
-    await send_brevo_email(email_clean, "EI HUB - Student Verification OTP Code", html, None)
-    return {"status": "success", "message": "Verification code queued for sending"}
+    email_sent = await send_brevo_email(email_clean, "EI HUB - Student Verification OTP Code", html, None)
+    if not email_sent and not is_testing:
+        try:
+            await db_execute("DELETE FROM otp_verifications WHERE id = ?", [otp_id])
+        except Exception as cleane:
+            print(f"[OTP Error] Failed to cleanup unsent OTP: {cleane}")
+        raise HTTPException(
+            status_code=502,
+            detail="Failed to deliver verification email. Please check your email configuration or try again later."
+        )
+
+    return {"status": "success", "message": "Verification code sent to your student email."}
 
 @app.post("/api/auth/otp/verify")
 async def verify_otp(data: dict = Body(...)):
@@ -1471,19 +1448,27 @@ async def verify_otp(data: dict = Body(...)):
         raise HTTPException(status_code=400, detail="Too many invalid attempts. This verification code has been invalidated. Please request a new code.")
 
     computed_hash = hashlib.sha256(code_clean.encode()).hexdigest()
-    if computed_hash != rec.get("otp_hash"):
-        await db_execute("UPDATE otp_verifications SET attempts = attempts + 1 WHERE id = ?", [rec["id"]])
+    if not hmac.compare_digest(computed_hash, rec.get("otp_hash", "")):
+        await db_execute("UPDATE otp_verifications SET attempts = attempts + 1 WHERE id = ? AND is_used = 0", [rec["id"]])
         raise HTTPException(status_code=400, detail="Invalid verification code. Please check and try again.")
 
-    # Mark as used (single-use enforcement)
-    await db_execute("UPDATE otp_verifications SET is_used = 1 WHERE id = ?", [rec["id"]])
+    # Mark as used (single-use enforcement with atomic conditional update for race-safety)
+    result = await db_execute(
+        "UPDATE otp_verifications SET is_used = 1 WHERE id = ? AND is_used = 0 AND attempts < 5 AND expires_at >= ?",
+        [rec["id"], now_iso]
+    )
+    if not result or getattr(result, "changes", 0) != 1:
+        raise HTTPException(status_code=400, detail="Verification code has already been used or expired. Please request a new code.")
+
     return {"status": "success", "message": "Email verified successfully."}
 
 @app.get("/api/health")
 async def health_check():
+    if startup_error:
+        print(f"[Health Check Alert] Internal startup error logged: {startup_error}")
     return {
         "status": "error" if startup_error else "ok",
-        "startup_error": startup_error,
+        "healthy": startup_error is None,
         "firebase_configured": firebase_initialized,
         "database_connected": client is not None and db_initialized
     }
@@ -3502,7 +3487,8 @@ async def email_report_pdf(req: EmailReportRequest, user: dict = Depends(require
             raise HTTPException(status_code=500, detail="Failed to send email via Brevo")
             
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        print(f"[Email Dispatch Error] Failed to send email: {e}")
+        raise HTTPException(status_code=500, detail="Failed to send email. Please verify settings and try again.")
 
 
 
