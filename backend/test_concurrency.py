@@ -61,11 +61,12 @@ class TestBackendConcurrency(unittest.TestCase):
         
         payload = call_kwargs["json"]
         self.assertTrue(isinstance(payload, dict))
-        self.assertIn("sql", payload)
-        self.assertIn("params", payload)
-        self.assertIn("SELECT * FROM components WHERE id = ?", payload["sql"])
-        self.assertIn("UPDATE components SET total_stock = ? WHERE id = ?", payload["sql"])
-        self.assertEqual(payload["params"], ["comp-1", 10, "comp-1"])
+        self.assertIn("batch", payload)
+        self.assertEqual(len(payload["batch"]), 2)
+        self.assertEqual(payload["batch"][0]["sql"], "SELECT * FROM components WHERE id = ?")
+        self.assertEqual(payload["batch"][0]["params"], ["comp-1"])
+        self.assertEqual(payload["batch"][1]["sql"], "UPDATE components SET total_stock = ? WHERE id = ?")
+        self.assertEqual(payload["batch"][1]["params"], [10, "comp-1"])
 
         # Verify the returned ResultSets
         self.assertEqual(len(results), 2)

@@ -7,17 +7,36 @@ import { formatDateOnly } from "./timestamp";
  */
 export const sendBrevoOtp = async (
   email: string,
-  code: string,
+  code?: string,
 ): Promise<void> => {
   try {
     await apiRequest(`/api/auth/otp`, {
       method: "POST",
-      body: JSON.stringify({ email, code }),
+      body: JSON.stringify({ email, ...(code ? { code } : {}) }),
     });
     console.log("[Brevo Tech] OTP email successfully dispatched via backend!");
-  } catch (error) {
+  } catch (error: any) {
     console.error("[Brevo Error Response]", error);
-    throw new Error("Failed to send OTP email.");
+    throw new Error(error.message || "Failed to send OTP email.");
+  }
+};
+
+/**
+ * Verifies a 6-digit OTP code against server-stored cryptographic hash.
+ */
+export const verifyBrevoOtp = async (
+  email: string,
+  code: string,
+): Promise<boolean> => {
+  try {
+    const res = await apiRequest(`/api/auth/otp/verify`, {
+      method: "POST",
+      body: JSON.stringify({ email, code }),
+    });
+    return res && res.status === "success";
+  } catch (error: any) {
+    console.error("[Brevo OTP Verify Error]", error);
+    throw new Error(error.message || "Invalid or expired OTP code.");
   }
 };
 

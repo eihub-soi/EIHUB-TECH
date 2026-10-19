@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { mockEngine } from '../services/mockEngine';
@@ -10,7 +10,7 @@ import { auth as firebaseAuth, db as firestoreDb, isFirebaseConfigured, firebase
 import { initializeApp, deleteApp } from 'firebase/app';
 import { createUserWithEmailAndPassword, sendPasswordResetEmail, getAuth } from 'firebase/auth';
 import { doc, setDoc } from 'firebase/firestore';
-import { sendBrevoOtp } from '../utils/brevoService';
+import { sendBrevoOtp, verifyBrevoOtp } from '../utils/brevoService';
 import { EMAIL_REGEX, LOWERCASE_EMAIL_ERROR, hasUppercase, validateEmail } from '../utils/emailValidation';
 import {
   Sparkles,
@@ -85,11 +85,36 @@ export const LoginPage: React.FC = () => {
 
   // OTP Verification Modal State
   const [showOtpModal, setShowOtpModal] = useState(false);
-  const [generatedOtp, setGeneratedOtp] = useState('');
   const [inputOtp, setInputOtp] = useState('');
   const [otpTimer, setOtpTimer] = useState(60);
 
   useEscapeKey(() => setShowOtpModal(false), showOtpModal);
+
+  useEffect(() => {
+    let interval: any = null;
+    if (showOtpModal && otpTimer > 0) {
+      interval = setInterval(() => {
+        setOtpTimer((prev) => (prev > 0 ? prev - 1 : 0));
+      }, 1000);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [showOtpModal, otpTimer]);
+
+  const handleResendOtp = async () => {
+    if (otpTimer > 0 || isLoading) return;
+    setIsLoading(true);
+    try {
+      await sendBrevoOtp(regEmail);
+      toast.success(`New OTP code sent to ${regEmail}!`);
+      setOtpTimer(60);
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to resend OTP.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   // Clear credentials when switching login tabs
   const handleTabChange = (role: UserRole) => {
@@ -174,7 +199,7 @@ export const LoginPage: React.FC = () => {
     }
   };
 
-  const handleRegisterSubmit = (e: React.FormEvent) => {
+  const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const regEmailValidation = validateEmail(regEmail);
     if (!regEmailValidation.isValid) {
@@ -205,30 +230,25 @@ export const LoginPage: React.FC = () => {
       return;
     }
 
-    // Generate random 6-digit OTP
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    setGeneratedOtp(code);
-    setInputOtp('');
-    setShowOtpModal(true);
-
-    const sendOtpEmail = async () => {
-      try {
-        await sendBrevoOtp(regEmail, code);
-        toast.success(`🔑 Verification OTP successfully sent to ${regEmail}!`);
-      } catch (err: any) {
-        console.warn('[Brevo API Error] Failed sending via Brevo API. Error details:', err);
-        console.log('[Brevo Fallback Dev Mode] Generated OTP is:', code);
-        toast.error(`❌ Brevo failed to send email: ${err.message || err}. (Dev: check console log for OTP)`);
-      }
-    };
-
-    sendOtpEmail();
+    setIsLoading(true);
+    try {
+      await sendBrevoOtp(regEmail);
+      toast.success(`Verification OTP successfully sent to ${regEmail}!`);
+      setInputOtp('');
+      setOtpTimer(60);
+      setShowOtpModal(true);
+    } catch (err: any) {
+      console.error('[Brevo Error] Failed sending verification email:', err?.message || err);
+      toast.error(err?.message || 'Failed to send verification email. Please try again or contact your administrator.');
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const handleVerifyOtpSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (inputOtp.trim() !== generatedOtp) {
-      toast.error('Invalid OTP verification code. Please check and try again.');
+    if (!inputOtp.trim() || inputOtp.trim().length !== 6) {
+      toast.error('Please enter a valid 6-digit OTP code.');
       return;
     }
 
@@ -245,6 +265,7 @@ export const LoginPage: React.FC = () => {
 
     setIsLoading(true);
     try {
+      await verifyBrevoOtp(regEmail, inputOtp.trim());
       if (isFirebaseConfigured && firebaseAuth) {
         const finalEmailCheck = validateEmail(regEmail);
         if (!finalEmailCheck.isValid) {
@@ -1002,6 +1023,20 @@ export const LoginPage: React.FC = () => {
                   autoFocus
                   required
                 />
+              </div>
+
+              <div className="flex items-center justify-between text-xs text-[#475569] px-1">
+                <span>Didn't receive code?</span>
+                <button
+                  type="button"
+                  disabled={otpTimer > 0 || isLoading}
+                  onClick={handleResendOtp}
+                  className={`font-bold transition-all ${
+                    otpTimer > 0 ? 'text-[#94A3B8] cursor-not-allowed' : 'text-[#475569] hover:text-[#102044] underline'
+                  }`}
+                >
+                  {otpTimer > 0 ? `Resend in ${otpTimer}s` : 'Resend OTP'}
+                </button>
               </div>
 
               <div className="flex items-center justify-between gap-3 pt-2">

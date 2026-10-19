@@ -1,12 +1,12 @@
 {
   "scripts": {
     "build": "cd frontend && npm install && npm run build",
-    "dev": "cd frontend && npm run dev"
+    "dev": "cd frontend && npm run dev",
+    "lint": "cd frontend && npm run lint",
+    "test": "cd frontend && npm test"
   },
-  "dependencies": {},
-
   "devDependencies": {
-    "@playwright/test": "^1.62.1",
+    "@playwright/test": "^1.64.1",
     "playwright": "^1.62.1"
   }
 }

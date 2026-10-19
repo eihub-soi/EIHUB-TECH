@@ -337,6 +337,128 @@ class TestSecurityHardening(unittest.TestCase):
             self.assertEqual(response.status_code, 429)
             self.assertIn("Retry-After", response.headers)
 
+    def test_send_otp_validation_and_domain_restriction(self):
+        # 1. Missing fields
+        res1 = self.client.post("/api/auth/otp", json={})
+        self.assertEqual(res1.status_code, 400)
+
+        # 2. Non-institutional email rejected (open relay prevention)
+        res2 = self.client.post("/api/auth/otp", json={"email": "attacker@gmail.com", "code": "123456"})
+        self.assertEqual(res2.status_code, 400)
+        self.assertIn("restricted to institutional", res2.json()["detail"])
+
+        # 3. Invalid code format / HTML injection attempt
+        res3 = self.client.post("/api/auth/otp", json={"email": "student@kgkite.ac.in", "code": "<script>alert(1)</script>"})
+        self.assertEqual(res3.status_code, 400)
+        self.assertIn("6-digit numeric code", res3.json()["detail"])
+
+        # 4. Non-6-digit code
+        res4 = self.client.post("/api/auth/otp", json={"email": "student@kgkite.ac.in", "code": "1234"})
+        self.assertEqual(res4.status_code, 400)
+        self.assertIn("6-digit numeric code", res4.json()["detail"])
+
+        # 5. Valid institutional email and 6-digit code accepted
+        from app.main import RATE_LIMIT_REQUESTS
+        RATE_LIMIT_REQUESTS.clear()
+        res5 = self.client.post("/api/auth/otp", json={"email": "student@kgkite.ac.in", "code": "654321"})
+        self.assertEqual(res5.status_code, 200)
+        self.assertEqual(res5.json()["status"], "success")
+
+    def test_otp_verification_and_single_use(self):
+        from app.main import RATE_LIMIT_REQUESTS
+        RATE_LIMIT_REQUESTS.clear()
+        # 1. Send OTP to generate entry in otp_verifications
+        email = "unique-otp-student@kgkite.ac.in"
+        res = self.client.post("/api/auth/otp", json={"email": email, "code": "789123"})
+        self.assertEqual(res.status_code, 200)
+
+        # 2. Invalid code format
+        res_inv = self.client.post("/api/auth/otp/verify", json={"email": email, "code": "abc"})
+        self.assertEqual(res_inv.status_code, 400)
+
+        # 3. Incorrect code
+        res_wrong = self.client.post("/api/auth/otp/verify", json={"email": email, "code": "000000"})
+        self.assertEqual(res_wrong.status_code, 400)
+        self.assertIn("Invalid verification code", res_wrong.json()["detail"])
+
+        # 4. Correct code verifies successfully
+        res_ok = self.client.post("/api/auth/otp/verify", json={"email": email, "code": "789123"})
+        self.assertEqual(res_ok.status_code, 200)
+        self.assertEqual(res_ok.json()["status"], "success")
+
+        # 5. Single-use enforcement: reusing the same OTP must be rejected
+        res_replay = self.client.post("/api/auth/otp/verify", json={"email": email, "code": "789123"})
+        self.assertEqual(res_replay.status_code, 400)
+        self.assertIn("no active verification code", res_replay.json()["detail"].lower())
+
+    def test_inventory_invariants_enforcement(self):
+        self.mock_user["role"] = "admin"
+
+        # 1. Negative total_stock rejected
+        res_neg = self.client.post("/api/components", json={
+            "name": "Negative Component",
+            "total_stock": -5,
+            "available_stock": -5
+        })
+        self.assertEqual(res_neg.status_code, 400)
+        self.assertIn("cannot be negative", res_neg.json()["detail"].lower())
+
+        # 2. available_stock > total_stock rejected
+        res_oversell = self.client.post("/api/components", json={
+            "name": "Oversell Component",
+            "total_stock": 10,
+            "available_stock": 15
+        })
+        self.assertEqual(res_oversell.status_code, 400)
+        self.assertIn("cannot exceed", res_oversell.json()["detail"].lower())
+
+    def test_return_state_enforcement(self):
+        self.mock_user["role"] = "student"
+        self.mock_user["uid"] = "stud-pending-1"
+
+        # 1. return-request on a pending request must be rejected
+        with patch("app.main.db_query") as mock_query:
+            mock_query.return_value = [{
+                "id": "req-pending-1", "student_id": "stud-pending-1", "component_id": "comp-1",
+                "quantity": 1, "status": "pending", "name": "ESP32"
+            }]
+            res = self.client.post("/api/requests/req-pending-1/return-request", json={"notes": "Return pending"})
+            self.assertEqual(res.status_code, 400)
+            self.assertIn("only approved requests", res.json()["detail"].lower())
+
+        # 2. return-process on a pending request must be rejected
+        self.mock_user["role"] = "faculty"
+        with patch("app.main.db_query") as mock_query:
+            mock_query.return_value = [{
+                "id": "req-pending-1", "student_id": "stud-pending-1", "component_id": "comp-1",
+                "quantity": 1, "status": "pending", "component_name": "ESP32", "total_stock": 10,
+                "available_stock": 10, "email": "student@kgkite.ac.in", "full_name": "Student Name"
+            }]
+            res = self.client.post("/api/requests/req-pending-1/return-process", json={"notes": "Process pending"})
+            self.assertEqual(res.status_code, 400)
+            self.assertIn("only active loans can be returned", res.json()["detail"].lower())
+
+    def test_report_date_range_validation(self):
+        self.mock_user["role"] = "admin"
+
+        # 1. from_date > to_date rejected
+        res_inverted = self.client.get("/api/admin/reports/download-csv?from_date=2026-12-31&to_date=2026-01-01")
+        self.assertEqual(res_inverted.status_code, 400)
+        self.assertIn("cannot be later than", res_inverted.json()["detail"])
+
+        # 2. Invalid date format rejected
+        res_invalid = self.client.get("/api/admin/reports/download-csv?from_date=invalid-date")
+        self.assertEqual(res_invalid.status_code, 400)
+        self.assertIn("Invalid from_date format", res_invalid.json()["detail"])
+
+        # 3. Valid date range returns utf-8 CSV with BOM
+        with patch("app.main.fetch_filtered_report_data") as mock_fetch:
+            mock_fetch.return_value = ([], [])
+            res_csv = self.client.get("/api/admin/reports/download-csv?from_date=2026-01-01&to_date=2026-01-31")
+            self.assertEqual(res_csv.status_code, 200)
+            self.assertTrue(res_csv.content.startswith(b'\xef\xbb\xbf'))  # utf-8-sig BOM
+
 if __name__ == "__main__":
     unittest.main()
+
 
