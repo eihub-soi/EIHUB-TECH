@@ -32,12 +32,12 @@ export const ReturnPortal: React.FC = () => {
 
   useEscapeKey(() => setSelectedReq(null), !!selectedReq);
 
-  const handleProcessReturn = (e: React.FormEvent) => {
+  const handleProcessReturn = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedReq) return;
 
     try {
-      mockEngine.requestReturnComponent(
+      await mockEngine.requestReturnComponent(
         selectedReq.id,
         user?.id || "usr-student-1",
         condition,

@@ -64,7 +64,7 @@ export const VerifyReceipt: React.FC = () => {
         // 2. If not found, try querying public API
         if (!req) {
           try {
-            const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+            const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || (import.meta.env.DEV ? "http://localhost:8000" : "");
             const response = await fetch(`${apiBaseUrl}/api/requests/verify/${encodeURIComponent(requestCode)}`);
             if (response.ok) {
               const rawData = await response.json();

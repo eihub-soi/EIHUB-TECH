@@ -77,7 +77,7 @@ export const BrowseComponents: React.FC = () => {
     toast.success(`Added ${comp.name} to your Requirements Cart!`);
   };
 
-  const handleConfirmCartRequest = (e: React.FormEvent) => {
+  const handleConfirmCartRequest = async (e: React.FormEvent) => {
     e.preventDefault();
     if (cart.length === 0 || !user) return;
 
@@ -113,9 +113,9 @@ export const BrowseComponents: React.FC = () => {
       );
 
       let submittedCount = 0;
-      cart.forEach((item) => {
+      for (const item of cart) {
         const fullPurpose = `Project Purpose: ${purpose}\nFrom Date: ${fromDate}\nTo Date: ${toDate}\nProject Guide: ${projectGuide}\nDescription: ${projectDescription}`;
-        mockEngine.submitBorrowRequest(
+        await mockEngine.submitBorrowRequest(
           user.id,
           item.component.id,
           item.quantity,
@@ -123,7 +123,7 @@ export const BrowseComponents: React.FC = () => {
           days,
         );
         submittedCount++;
-      });
+      }
 
       toast.success(
         `Submitted borrowing request for ${submittedCount} components to ${projectGuide}!`,

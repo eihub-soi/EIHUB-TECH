@@ -4,9 +4,9 @@ import asyncio
 from typing import Optional, List
 
 async def send_brevo_email(to_email: str, subject: str, html_content: str, attachment: Optional[list] = None) -> bool:
-    api_key = os.environ.get("BREVO_API_KEY") or os.environ.get("VITE_BREVO_API_KEY")
-    sender_email = os.environ.get("BREVO_SENDER_EMAIL") or os.environ.get("VITE_BREVO_SENDER_EMAIL", "eihubsoi@gmail.com")
-    sender_name = os.environ.get("BREVO_SENDER_NAME") or os.environ.get("VITE_BREVO_SENDER_NAME", "EI HUB Support")
+    api_key = os.environ.get("BREVO_API_KEY")
+    sender_email = os.environ.get("BREVO_SENDER_EMAIL", "eihubsoi@gmail.com")
+    sender_name = os.environ.get("BREVO_SENDER_NAME", "EI HUB Support")
     
     if not api_key:
         print(f"[Brevo Service] API key not configured. Cannot send email to: {to_email}")
@@ -49,9 +49,9 @@ async def send_brevo_email(to_email: str, subject: str, html_content: str, attac
     return False
 
 async def send_brevo_email_advanced(to_emails: List[str], subject: str, html_content: str, cc_emails: Optional[List[str]] = None, bcc_emails: Optional[List[str]] = None, attachment: Optional[list] = None) -> bool:
-    api_key = os.environ.get("BREVO_API_KEY") or os.environ.get("VITE_BREVO_API_KEY")
-    sender_email = os.environ.get("BREVO_SENDER_EMAIL") or os.environ.get("VITE_BREVO_SENDER_EMAIL", "eihubsoi@gmail.com")
-    sender_name = os.environ.get("BREVO_SENDER_NAME") or os.environ.get("VITE_BREVO_SENDER_NAME", "EI HUB Support")
+    api_key = os.environ.get("BREVO_API_KEY")
+    sender_email = os.environ.get("BREVO_SENDER_EMAIL", "eihubsoi@gmail.com")
+    sender_name = os.environ.get("BREVO_SENDER_NAME", "EI HUB Support")
     
     if not api_key:
         print(f"[Brevo Service] API key not configured. Cannot send email to: {to_emails}")
