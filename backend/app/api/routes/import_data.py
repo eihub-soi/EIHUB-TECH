@@ -4,6 +4,7 @@ from pydantic import BaseModel
 import asyncio
 import io
 import csv
+import sys
 
 # We will assume db_query, db_batch are available in main app or db module
 from app.main import db_query, db_batch, get_current_user, require_admin, require_faculty_or_admin, log_activity
@@ -617,22 +618,147 @@ from PIL import Image, ImageEnhance, ImageFilter
 # Limit concurrent OCR workers to avoid CPU starvation
 ocr_executor = ThreadPoolExecutor(max_workers=4)
 
-# Configure Tesseract path if Windows
-if os.name == 'nt':
-    env_path = os.environ.get("TESSERACT_CMD")
-    if env_path and os.path.exists(env_path):
-        pytesseract.pytesseract.tesseract_cmd = env_path
-    else:
-        # Detect standard Tesseract installation paths on Windows
-        standard_paths = [
+# -------------------------------------------------------------------------
+# CROSS-PLATFORM OCR ENGINE CONFIGURATION (ENVIRONMENT-DRIVEN)
+# -------------------------------------------------------------------------
+
+def configure_ocr_engine():
+    """Configures Tesseract and tessdata paths dynamically from environment and system PATH."""
+    import shutil
+    
+    # 1. Tesseract Executable: Check environment variables first
+    env_tess = os.environ.get("TESSERACT_CMD") or os.environ.get("TESSERACT_PATH")
+    if env_tess and os.path.exists(env_tess):
+        pytesseract.pytesseract.tesseract_cmd = env_tess
+    elif shutil.which("tesseract"):
+        # Found in system PATH (standard on Linux/Docker/Mac, or Windows PATH)
+        pytesseract.pytesseract.tesseract_cmd = "tesseract"
+    elif os.name == 'nt':
+        # Fallback to standard Windows installation paths if not in PATH
+        win_candidates = [
+            os.path.expandvars(r"%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe"),
             r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
-            os.path.expandvars(r"%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe")
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"
         ]
-        for p in standard_paths:
+        for p in win_candidates:
             if os.path.exists(p):
                 pytesseract.pytesseract.tesseract_cmd = p
                 break
+    else:
+        # Fallback to standard Unix/Linux paths if not in PATH
+        unix_candidates = [
+            "/usr/bin/tesseract",
+            "/usr/local/bin/tesseract",
+            "/opt/homebrew/bin/tesseract"
+        ]
+        for p in unix_candidates:
+            if os.path.exists(p):
+                pytesseract.pytesseract.tesseract_cmd = p
+                break
+
+    # 2. TESSDATA_PREFIX Configuration
+    if not os.environ.get("TESSDATA_PREFIX"):
+        curr_cmd = pytesseract.pytesseract.tesseract_cmd
+        if os.path.isabs(curr_cmd):
+            adjacent = os.path.join(os.path.dirname(curr_cmd), "tessdata")
+            if os.path.exists(adjacent):
+                os.environ["TESSDATA_PREFIX"] = adjacent
+        if not os.environ.get("TESSDATA_PREFIX"):
+            linux_tessdata = [
+                "/usr/share/tesseract-ocr/5/tessdata",
+                "/usr/share/tesseract-ocr/4.00/tessdata",
+                "/usr/share/tessdata",
+                "/usr/local/share/tessdata"
+            ]
+            for td in linux_tessdata:
+                if os.path.exists(td):
+                    os.environ["TESSDATA_PREFIX"] = td
+                    break
+
+configure_ocr_engine()
+
+def get_poppler_path() -> Optional[str]:
+    """Resolves Poppler bin directory containing pdftoppm across Windows, Linux, and Docker."""
+    # 1. Environment variable override
+    env_pop = os.environ.get("POPPLER_PATH")
+    if env_pop and os.path.exists(env_pop):
+        return env_pop
+        
+    # 2. If pdftoppm is already in system PATH (standard on Linux/Docker and configured Windows), return None
+    import shutil
+    if shutil.which("pdftoppm"):
+        return None
+        
+    # 3. OS-specific discovery
+    if os.name == 'nt':
+        import glob
+        candidates = [
+            os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Packages\oschwartz10612.Poppler_Microsoft.Winget.Source_8wekyb3d8bbwe\poppler-25.07.0\Library\bin"),
+            r"C:\Program Files\poppler\bin",
+            r"C:\poppler\bin"
+        ]
+        for c in candidates:
+            if os.path.exists(c) and os.path.exists(os.path.join(c, "pdftoppm.exe")):
+                return c
+        winget_pkg = os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Packages")
+        matches = glob.glob(os.path.join(winget_pkg, "*Poppler*", "**", "bin"), recursive=True)
+        for m in matches:
+            if os.path.exists(os.path.join(m, "pdftoppm.exe")):
+                return m
+    else:
+        unix_pop_candidates = ["/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"]
+        for c in unix_pop_candidates:
+            if os.path.exists(os.path.join(c, "pdftoppm")):
+                return c
+    return None
+
+def is_poppler_available() -> bool:
+    import shutil
+    if shutil.which("pdftoppm"):
+        return True
+    pop_p = get_poppler_path()
+    if pop_p:
+        binary_name = "pdftoppm.exe" if os.name == 'nt' else "pdftoppm"
+        return os.path.exists(os.path.join(pop_p, binary_name))
+    return False
+
+def is_tesseract_available() -> bool:
+    cmd = pytesseract.pytesseract.tesseract_cmd
+    if os.path.isabs(cmd):
+        return os.path.exists(cmd)
+    import shutil
+    return shutil.which(cmd) is not None
+
+def get_tesseract_languages() -> List[str]:
+    """Returns available language models for Tesseract."""
+    try:
+        if is_tesseract_available():
+            return pytesseract.get_languages()
+    except Exception:
+        pass
+    return []
+
+def log_ocr_diagnostics():
+    """Prints diagnostic information for Tesseract OCR and Poppler utilities."""
+    tess_avail = is_tesseract_available()
+    pop_path = get_poppler_path()
+    pop_avail = is_poppler_available()
+    tess_ver = "Not installed"
+    langs = []
+    if tess_avail:
+        try:
+            tess_ver = str(pytesseract.get_tesseract_version())
+            langs = get_tesseract_languages()
+        except Exception as e:
+            tess_ver = f"Available ({e})"
+    eng_ready = "eng" in langs
+    print(f"[OCR Diagnostics] OS: {os.name} ({sys.platform})")
+    print(f"[OCR Diagnostics] Tesseract OCR: {'Available' if tess_avail else 'Missing'} (v{tess_ver}) | Binary: {pytesseract.pytesseract.tesseract_cmd}")
+    print(f"[OCR Diagnostics] Language Models: {langs} (English Ready: {eng_ready})")
+    print(f"[OCR Diagnostics] Poppler Utilities: {'Available' if pop_avail else 'Missing'} | Path: {pop_path or 'System PATH'}")
+
+# Run diagnostics at module load
+log_ocr_diagnostics()
 
 # -------------------------------------------------------------------------
 # HELPERS & LAYOUT EXTRACTION PIPELINE
@@ -643,13 +769,6 @@ def get_similarity(s1: str, s2: str) -> float:
     if not s1 or not s2:
         return 0.0
     return difflib.SequenceMatcher(None, s1.lower().strip(), s2.lower().strip()).ratio()
-
-def is_tesseract_available() -> bool:
-    cmd = pytesseract.pytesseract.tesseract_cmd
-    if os.path.isabs(cmd):
-        return os.path.exists(cmd)
-    import shutil
-    return shutil.which(cmd) is not None
 
 def get_mock_image_to_data() -> Dict[str, Any]:
     """Generates structured coordinate mock output matching Tesseract image_to_data format."""
@@ -741,6 +860,26 @@ def get_mock_image_to_data() -> Dict[str, Any]:
         'line_num': [1] * len(text_list),
         'word_num': list(range(len(text_list)))
     }
+
+def auto_orient_image(img: Image.Image, is_pdf: bool = False) -> Image.Image:
+    """Detects and fixes orientation using EXIF tags and Tesseract OSD for photos."""
+    try:
+        from PIL import ImageOps
+        img = ImageOps.exif_transpose(img)
+    except Exception:
+        pass
+    if not is_pdf:
+        try:
+            if is_tesseract_available():
+                osd = pytesseract.image_to_osd(img, output_type=pytesseract.Output.DICT)
+                conf = float(osd.get('orientation_conf', 0.0))
+                rot = int(osd.get('rotate', 0))
+                # Only apply OSD rotation if confidence is reliable and rotation is needed
+                if conf >= 5.0 and rot in (90, 180, 270):
+                    img = img.rotate(360 - rot, expand=True)
+        except Exception:
+            pass
+    return img
 
 def get_preprocessed_images(img: Image.Image) -> Dict[str, Image.Image]:
     """Generates five image variants for OCR evaluation."""
@@ -1243,7 +1382,11 @@ def perform_ocr_sync(content: bytes, is_pdf: bool) -> Dict[str, Any]:
     pages = []
     if is_pdf:
         try:
-            pages = convert_from_bytes(content)
+            pop_path = get_poppler_path()
+            if pop_path:
+                pages = convert_from_bytes(content, poppler_path=pop_path)
+            else:
+                pages = convert_from_bytes(content)
         except Exception as e:
             print(f"[OCR Converter] Poppler conversion failed: {e}")
     else:
@@ -1258,6 +1401,9 @@ def perform_ocr_sync(content: bytes, is_pdf: bool) -> Dict[str, Any]:
         parsed = parse_ocr_coordinates(raw_data)
         parsed['raw_text'] = "\n".join(parsed['all_row_texts'])
         return parsed
+
+    # Auto-orient each page (handles smartphone camera EXIF tags)
+    pages = [auto_orient_image(p, is_pdf=is_pdf) for p in pages]
         
     all_pages_rows = []
     all_raw_texts = []
@@ -1267,10 +1413,9 @@ def perform_ocr_sync(content: bytes, is_pdf: bool) -> Dict[str, Any]:
     p1_versions = get_preprocessed_images(p1)
     
     # Search metadata grand total for scoring validation if possible
-    # (Just a rough regex check on standard OCR text)
     temp_txt = ""
     try:
-        res = pytesseract.image_to_string(p1_versions['version_a'])
+        res = pytesseract.image_to_string(p1_versions['version_a'], lang='eng')
         if isinstance(res, str):
             temp_txt = res
         elif isinstance(res, bytes):
@@ -1298,7 +1443,7 @@ def perform_ocr_sync(content: bytes, is_pdf: bool) -> Dict[str, Any]:
         if ver_name not in p1_versions:
             continue
         try:
-            raw_data = pytesseract.image_to_data(p1_versions[ver_name], config=config, output_type=pytesseract.Output.DICT)
+            raw_data = pytesseract.image_to_data(p1_versions[ver_name], lang='eng', config=config, output_type=pytesseract.Output.DICT)
             parsed = parse_ocr_coordinates(raw_data)
             score = score_ocr_result(parsed, target_gt)
             if score > best_score:
@@ -1318,7 +1463,7 @@ def perform_ocr_sync(content: bytes, is_pdf: bool) -> Dict[str, Any]:
         page_versions = get_preprocessed_images(page)
         img_to_use = page_versions.get(best_ver, page_versions['version_a'])
         try:
-            raw_data = pytesseract.image_to_data(img_to_use, config=best_config, output_type=pytesseract.Output.DICT)
+            raw_data = pytesseract.image_to_data(img_to_use, lang='eng', config=best_config, output_type=pytesseract.Output.DICT)
             parsed_page = parse_ocr_coordinates(raw_data)
             all_pages_rows.extend(parsed_page.get('raw_rows', []))
             all_raw_texts.extend(parsed_page.get('all_row_texts', []))
@@ -1331,6 +1476,33 @@ def perform_ocr_sync(content: bytes, is_pdf: bool) -> Dict[str, Any]:
         'all_row_texts': all_raw_texts,
         'raw_text': "\n".join(all_raw_texts)
     }
+
+def normalize_gstin_ocr(gst: str) -> str:
+    """Normalizes common OCR character confusions in 15-character Indian GSTINs."""
+    if not gst:
+        return ""
+    gst = re.sub(r'[^0-9a-zA-Z]', '', gst).upper()
+    if len(gst) == 16 and "2Z" in gst:
+        gst = gst.replace("2Z", "Z")
+    if len(gst) != 15:
+        return gst
+    chars = list(gst)
+    digit_fix = {'O': '0', 'D': '0', 'I': '1', 'L': '1', 'Z': '2', 'S': '5', 'B': '8'}
+    letter_fix = {'0': 'O', '1': 'I', '8': 'B', '5': 'S', '2': 'Z'}
+    for i in (0, 1):
+        if chars[i] in digit_fix:
+            chars[i] = digit_fix[chars[i]]
+    for i in range(2, 7):
+        if chars[i] in letter_fix:
+            chars[i] = letter_fix[chars[i]]
+    for i in range(7, 11):
+        if chars[i] in digit_fix:
+            chars[i] = digit_fix[chars[i]]
+    if chars[11] in letter_fix:
+        chars[11] = letter_fix[chars[11]]
+    if chars[13] in ['2', '7', 'S']:
+        chars[13] = 'Z'
+    return "".join(chars)
 
 # -------------------------------------------------------------------------
 # API ROUTE HANDLERS
@@ -1348,8 +1520,8 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
             detail="Access Denied: The Purchase Bills feature is available for Administrators only."
         )
     content = await file.read()
-    if len(content) > 5 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="File too large. Maximum size is 5MB.")
+    if len(content) > 20 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="File too large. Maximum size is 20MB.")
     is_pdf = bool(file.filename and file.filename.lower().endswith(".pdf"))
     
     try:
@@ -1390,22 +1562,48 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
     lines = [str(x) for x in lines_val] if isinstance(lines_val, list) else []
     
     # Metadata Regex Extraction rules
-    gstin_pattern = re.compile(r"\b([0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1})\b")
-    invoice_pattern = re.compile(r"(?i)\b(?:invoice|bill|inv)\b(?:\s*(?:no|number|#))?[\t ]*[:.]?[\t ]*([a-zA-Z0-9\-\/]+)")
+    gstin_pattern = re.compile(r"\b([0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}[Z2][0-9A-Z]{1})\b")
+    invoice_pattern = re.compile(r"(?i)\b(?:invoice|bill|inv)\b(?:\s*(?:no\.?|number|#|nox))?[\t :.\-]+[\t ]*([a-zA-Z0-9\-\/]+)")
     date_pattern = re.compile(r"(?i)(?:date|dt)[\t ]*[:.]?[\t ]*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})")
+    due_date_pattern = re.compile(r"(?i)(?:due\s*date|due\s*dt|payment\s*due)[\t ]*[:.]?[\t ]*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})")
+    po_pattern = re.compile(r"(?i)\b(?:p\.?o\.?|purchase\s*order)\b(?:\s*(?:no|number|#))?[\t ]*[:.]?[\t ]*([a-zA-Z0-9\-\/]+)")
     total_pattern = re.compile(r"(?i)(?:grand\s*total|total\s*amount|amount\s*payable|net\s*payable)[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
     subtotal_pattern = re.compile(r"(?i)(?:subtotal|sub-total|total\s*before\s*tax)[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
+    taxable_pattern = re.compile(r"(?i)(?:taxable\s*amount|taxable\s*value|taxable\s*val)[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
     gst_tax_pattern = re.compile(r"(?i)(?:cgst|sgst|igst|gst|tax\s*amount)[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
+    cgst_pattern = re.compile(r"(?i)(?:cgst|central\s*tax|central\s*gst)[\t ]*(?:@[\t ]*\d+(?:\.\d+)?%)?[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
+    sgst_pattern = re.compile(r"(?i)(?:sgst|state\s*tax|state\s*gst|utgst)[\t ]*(?:@[\t ]*\d+(?:\.\d+)?%)?[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
+    igst_pattern = re.compile(r"(?i)(?:igst|integrated\s*tax|integrated\s*gst)[\t ]*(?:@[\t ]*\d+(?:\.\d+)?%)?[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
     discount_pattern = re.compile(r"(?i)(?:discount|disc)[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
+    round_off_pattern = re.compile(r"(?i)(?:round\s*off|roundoff)[\t ]*[:.]?[\t ]*([+-]?[0-9,]+\.[0-9]{2})")
     
     gst_match = gstin_pattern.search(raw_text)
-    supplier_gst = gst_match.group(1) if gst_match else ""
+    supplier_gst = normalize_gstin_ocr(gst_match.group(1)) if gst_match else ""
+    if not supplier_gst:
+        # Check labeled GSTIN with optional internal spacing from OCR
+        labeled_gst = re.search(r"(?i)\b(?:gstin|gst\s*no|gst\s*number|gst)[\t :.\-]+[\t ]*([0-9a-zA-Z\s]{15,18})\b", raw_text)
+        if labeled_gst:
+            cleaned = re.sub(r'[^0-9a-zA-Z]', '', labeled_gst.group(1)).upper()
+            if len(cleaned) == 16 and "2Z" in cleaned:
+                cleaned = cleaned.replace("2Z", "Z")
+            if len(cleaned) == 15:
+                supplier_gst = normalize_gstin_ocr(cleaned)
     
     inv_match = invoice_pattern.search(raw_text)
     invoice_number = inv_match.group(1).strip() if inv_match else ""
+    if invoice_number.lower() in ['no', 'number', 'x', '']:
+        fallback_inv = re.search(r"(?i)(?:invoice|bill|inv)[\s\w.:#-]*?([A-Z0-9]{2,}[-][A-Z0-9\-_/]+)", raw_text)
+        if fallback_inv:
+            invoice_number = fallback_inv.group(1).strip()
     
     dt_match = date_pattern.search(raw_text)
     invoice_date = dt_match.group(1).strip() if dt_match else ""
+    
+    due_match = due_date_pattern.search(raw_text)
+    due_date = due_match.group(1).strip() if due_match else ""
+    
+    po_match = po_pattern.search(raw_text)
+    po_number = po_match.group(1).strip() if po_match else ""
     
     tot_match = total_pattern.search(raw_text)
     grand_total = float(tot_match.group(1).replace(",", "")) if tot_match else 0.0
@@ -1413,11 +1611,37 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
     sub_match = subtotal_pattern.search(raw_text)
     subtotal = float(sub_match.group(1).replace(",", "")) if sub_match else 0.0
     
+    taxable_match = taxable_pattern.search(raw_text)
+    taxable_amount = float(taxable_match.group(1).replace(",", "")) if taxable_match else 0.0
+    
     tax_match = gst_tax_pattern.search(raw_text)
     gst_tax = float(tax_match.group(1).replace(",", "")) if tax_match else 0.0
     
+    cgst_match = cgst_pattern.search(raw_text)
+    cgst = float(cgst_match.group(1).replace(",", "")) if cgst_match else 0.0
+    
+    sgst_match = sgst_pattern.search(raw_text)
+    sgst = float(sgst_match.group(1).replace(",", "")) if sgst_match else 0.0
+    
+    igst_match = igst_pattern.search(raw_text)
+    igst = float(igst_match.group(1).replace(",", "")) if igst_match else 0.0
+    
     disc_match = discount_pattern.search(raw_text)
     discount = float(disc_match.group(1).replace(",", "")) if disc_match else 0.0
+    
+    round_match = round_off_pattern.search(raw_text)
+    round_off = float(round_match.group(1).replace(",", "")) if round_match else 0.0
+    
+    # Financial reconciliation adjustments
+    if gst_tax == 0.0 and (cgst > 0 or sgst > 0 or igst > 0):
+        gst_tax = cgst + sgst + igst
+    elif gst_tax > 0 and cgst == 0 and sgst == 0 and igst == 0:
+        # Default symmetric 50-50 split between CGST and SGST for intra-state
+        cgst = round(gst_tax / 2.0, 2)
+        sgst = round(gst_tax - cgst, 2)
+        
+    if taxable_amount == 0.0 and subtotal > 0.0:
+        taxable_amount = subtotal
     
     # Heuristic Supplier Name detection
     supplier_name = ""
@@ -1442,6 +1666,87 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
         warnings.append("Invoice number not found")
     if not invoice_date:
         warnings.append("Invoice date not found")
+        
+    # Check for duplicate invoice in database
+    is_duplicate = False
+    duplicate_info = None
+    if invoice_number:
+        try:
+            dup_query = "SELECT id, invoice_number, supplier_name, grand_total, created_at FROM purchase_invoices WHERE invoice_number = ?"
+            dup_records = await db_query(dup_query, [invoice_number])
+            if not dup_records:
+                dup_records = await db_query("SELECT id, invoice_ref, supplier_name, total_cost, created_at FROM purchase_orders WHERE invoice_ref = ?", [invoice_number])
+            if dup_records and any("invoice_number" in r or "invoice_ref" in r for r in dup_records):
+                is_duplicate = True
+                dup_rec = dup_records[0]
+                dup_sup = dup_rec.get("supplier_name", supplier_name)
+                dup_msg = f"Duplicate Invoice Alert: Invoice '{invoice_number}' (Supplier: {dup_sup}) already exists in the purchase register."
+                warnings.insert(0, dup_msg)
+                duplicate_info = {
+                    "invoice_number": invoice_number,
+                    "supplier_name": dup_sup,
+                    "existing_id": dup_rec.get("id"),
+                    "created_at": dup_rec.get("created_at")
+                }
+        except Exception as e:
+            print(f"[Duplicate Check Warning] {e}")
+            
+    # Check existing supplier by GSTIN or Name
+    supplier_match = None
+    if supplier_gst:
+        try:
+            sup_rows = await db_query("SELECT id, name, gstin, phone, address FROM suppliers WHERE gstin = ?", [supplier_gst])
+            if sup_rows:
+                s = sup_rows[0]
+                supplier_match = {
+                    "id": s["id"],
+                    "name": s["name"],
+                    "gstin": s.get("gstin", ""),
+                    "phone": s.get("phone", ""),
+                    "address": s.get("address", ""),
+                    "is_existing": True
+                }
+                if not supplier_name:
+                    supplier_name = s["name"]
+        except Exception as e:
+            print(f"[Supplier GST Lookup] {e}")
+    if not supplier_match and supplier_name:
+        try:
+            sup_rows = await db_query("SELECT id, name, gstin, phone, address FROM suppliers WHERE LOWER(name) = ?", [supplier_name.lower().strip()])
+            if sup_rows:
+                s = sup_rows[0]
+                supplier_match = {
+                    "id": s["id"],
+                    "name": s["name"],
+                    "gstin": s.get("gstin", ""),
+                    "phone": s.get("phone", ""),
+                    "address": s.get("address", ""),
+                    "is_existing": True
+                }
+        except Exception as e:
+            print(f"[Supplier Name Lookup] {e}")
+            
+    # Confidence scores for metadata
+    confidence = {
+        "supplier_name": 95 if supplier_name and any(k in raw_text.lower() for k in ["supplier:", "vendor:"]) else (80 if supplier_name else 0),
+        "supplier_gst": 98 if supplier_gst else 0,
+        "invoice_number": 95 if invoice_number else 0,
+        "invoice_date": 95 if invoice_date else 0,
+        "due_date": 90 if due_date else 0,
+        "grand_total": 95 if grand_total > 0 else 0,
+        "subtotal": 90 if subtotal > 0 else 0,
+        "tax": 90 if gst_tax > 0 else 0,
+        "overall": 92
+    }
+    uncertain_fields = []
+    if not supplier_gst:
+        uncertain_fields.append("supplier_gst")
+    if not invoice_number:
+        uncertain_fields.append("invoice_number")
+    if not invoice_date:
+        uncertain_fields.append("invoice_date")
+    if grand_total <= 0:
+        uncertain_fields.append("grand_total")
         
     # Reconstruct/merge wrap-around description lines
     final_raw_rows = []
@@ -1495,17 +1800,27 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
             
         is_excluded = any(kw in name.lower() for kw in NON_COMPONENT_KEYWORDS)
         
+        # Extract HSN if available in row text
+        hsn_val = r.get('hsn', '')
+        if not hsn_val:
+            hsn_match = re.search(r'\b(\d{4,8})\b', r.get('original_row_text', ''))
+            if hsn_match:
+                hsn_val = hsn_match.group(1)
+        
         # Convert to component row dictionary
         item_dict = {
             "id": f"ocr-item-{idx}",
             "item_name": name,
             "part_number": "",
+            "hsn_code": hsn_val,
             "category": "Select Category",
             "description": "Imported via Purchase Bill OCR",
             "features": "",
             "quantity": r['quantity'],
-            "unit": r['unit'],
+            "unit": r.get('unit') or 'pcs',
             "unit_price": r['unit_price'],
+            "discount": 0.0,
+            "tax_rate": 18.0 if gst_tax > 0 else 0.0,
             "total": r['total'] if r['total'] > 0 else (r['quantity'] * r['unit_price']),
             "confidence_score": r['confidence_score'],
             "accepted_as_new": False
@@ -1555,12 +1870,23 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
             "supplier_gst": supplier_gst,
             "invoice_number": invoice_number,
             "invoice_date": invoice_date,
+            "due_date": due_date,
+            "po_number": po_number,
             "grand_total": grand_total if grand_total > 0 else calculated_total,
             "subtotal": subtotal if subtotal > 0 else total_components_cost,
+            "taxable_amount": taxable_amount if taxable_amount > 0 else total_components_cost,
             "discount": discount,
             "gst_tax": gst_tax,
-            "po_number": "",
-            "calculated_total": calculated_total
+            "cgst": cgst,
+            "sgst": sgst,
+            "igst": igst,
+            "round_off": round_off,
+            "calculated_total": calculated_total,
+            "confidence": confidence,
+            "uncertain_fields": uncertain_fields,
+            "is_duplicate": is_duplicate,
+            "duplicate_info": duplicate_info,
+            "supplier_match": supplier_match
         },
         "line_items": line_items,
         "excluded_items": excluded_items,
@@ -1584,10 +1910,10 @@ async def verify_purchase(req: PurchaseVerifyRequest, user=Depends(require_facul
     Re-validates user edited values against Components catalog
     and updates validation state, categories, stocks, and status checks.
     """
-    if user.get("role") in ["faculty", "admin"]:
+    if user.get("role") not in ["admin", "super_admin"]:
         raise HTTPException(
             status_code=403,
-            detail="Access Denied: The Purchase Bills feature is not available for Faculty and Admin."
+            detail="Access Denied: The Purchase Bills feature is available for Administrators only."
         )
     existing_comps = await db_query("SELECT id, name, category, description, total_stock FROM components")
     comp_map = {normalize_name(c["name"]): c for c in existing_comps}
@@ -1629,14 +1955,39 @@ async def confirm_purchase(req: PurchaseConfirmRequest, user=Depends(require_adm
     Transactional confirmation of Purchase Bill.
     Inserts separate purchase_orders items, creates/updates components, and logs details.
     """
-    if user.get("role") in ["faculty", "admin"]:
+    if user.get("role") not in ["admin", "super_admin"]:
         raise HTTPException(
             status_code=403,
-            detail="Access Denied: The Purchase Bills feature is not available for Faculty and Admin."
+            detail="Access Denied: The Purchase Bills feature is available for Administrators only."
         )
     if not req.line_items:
         raise HTTPException(status_code=400, detail="No line items provided")
         
+    invoice_ref = (req.metadata.get("invoice_number") or "INV-OCR").strip()
+    supplier = (req.metadata.get("supplier_name") or "Unknown Supplier").strip()
+    supplier_gst = (req.metadata.get("supplier_gst") or "").strip()
+    allow_duplicate = req.metadata.get("allow_duplicate", False)
+    
+    # Duplicate Invoice Validation
+    if not allow_duplicate and invoice_ref and invoice_ref != "INV-OCR":
+        try:
+            dup_records = await db_query("SELECT id, invoice_number, supplier_name FROM purchase_invoices WHERE invoice_number = ?", [invoice_ref])
+            if dup_records and any("invoice_number" in r for r in dup_records):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Duplicate Invoice: Invoice #{invoice_ref} from supplier '{supplier}' has already been recorded in the purchase register."
+                )
+            dup_pos = await db_query("SELECT id, invoice_ref, supplier_name FROM purchase_orders WHERE invoice_ref = ? AND supplier_name = ?", [invoice_ref, supplier])
+            if dup_pos and any("invoice_ref" in r for r in dup_pos):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Duplicate Invoice: Invoice #{invoice_ref} from supplier '{supplier}' has already been recorded in the purchase register."
+                )
+        except HTTPException:
+            raise
+        except Exception as e:
+            print(f"[Duplicate Check in Confirm Warning] {e}")
+
     # Block confirmation if there are any critical errors or unresolved states in line items
     for item in req.line_items:
         name = item.get("item_name", "").strip()
@@ -1661,9 +2012,6 @@ async def confirm_purchase(req: PurchaseConfirmRequest, user=Depends(require_adm
     
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
-    
-    invoice_ref = req.metadata.get("invoice_number", "INV-OCR")
-    supplier = req.metadata.get("supplier_name", "Unknown Supplier")
     po_num = req.metadata.get("po_number") or invoice_ref
     
     imported = 0
@@ -1672,6 +2020,50 @@ async def confirm_purchase(req: PurchaseConfirmRequest, user=Depends(require_adm
     
     existing_comps = await db_query("SELECT id, name, category, total_stock, available_stock FROM components")
     comp_map = {normalize_name(c["name"]): c for c in existing_comps}
+    
+    # 1. Structured Purchase Invoice Header Record
+    inv_id = "inv-" + str(uuid.uuid4())[:8]
+    subtotal_val = float(req.metadata.get("subtotal") or 0.0)
+    grand_total_val = float(req.metadata.get("grand_total") or 0.0)
+    taxable_val = float(req.metadata.get("taxable_amount") or subtotal_val)
+    cgst_val = float(req.metadata.get("cgst") or 0.0)
+    sgst_val = float(req.metadata.get("sgst") or 0.0)
+    igst_val = float(req.metadata.get("igst") or 0.0)
+    total_tax_val = float(req.metadata.get("gst_tax") or (cgst_val + sgst_val + igst_val))
+    discount_val = float(req.metadata.get("discount") or 0.0)
+    round_off_val = float(req.metadata.get("round_off") or 0.0)
+    inv_date = req.metadata.get("invoice_date") or now[:10]
+    due_date = req.metadata.get("due_date") or ""
+    
+    queries.append(
+        """INSERT INTO purchase_invoices (id, invoice_number, invoice_date, due_date, po_number, supplier_id, supplier_name, supplier_gstin, subtotal, taxable_amount, cgst, sgst, igst, total_tax, discount, round_off, grand_total, items_count, total_units, status, created_by, created_by_name, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', ?, ?, ?, ?)"""
+    )
+    args.append([
+        inv_id,
+        invoice_ref,
+        inv_date,
+        due_date,
+        po_num,
+        req.metadata.get("supplier_id") or "",
+        supplier,
+        supplier_gst,
+        subtotal_val,
+        taxable_val,
+        cgst_val,
+        sgst_val,
+        igst_val,
+        total_tax_val,
+        discount_val,
+        round_off_val,
+        grand_total_val,
+        len(req.line_items),
+        sum(int(item.get("quantity", 0)) for item in req.line_items),
+        user.get("uid", "admin"),
+        user.get("name", "Admin"),
+        now,
+        now
+    ])
     
     for item in req.line_items:
         name = item.get("item_name", "").strip()
@@ -1682,6 +2074,10 @@ async def confirm_purchase(req: PurchaseConfirmRequest, user=Depends(require_adm
         features = item.get("features") or ""
         status = item.get("status") or "Active"
         unit = item.get("unit") or "pcs"
+        hsn_code = item.get("hsn_code") or item.get("hsn") or ""
+        part_number = item.get("part_number") or item.get("item_code") or ""
+        discount = float(item.get("discount") or 0.0)
+        item_total = float(item.get("total") or (qty * price))
         
         norm = normalize_name(name)
         po_id = "po-" + str(uuid.uuid4())[:8]
@@ -1718,6 +2114,33 @@ async def confirm_purchase(req: PurchaseConfirmRequest, user=Depends(require_adm
             args.append([comp_id, name, category, full_desc, qty, qty, "Lab A", unit, now, now])
             imported += 1
             
+        # 2. Structured Line Item Record
+        pii_id = "pii-" + str(uuid.uuid4())[:8]
+        queries.append(
+            """INSERT INTO purchase_invoice_items (id, invoice_id, component_id, item_name, hsn_code, item_code, description, quantity, unit, unit_price, discount, tax_rate, cgst_amount, sgst_amount, igst_amount, total_amount, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+        )
+        args.append([
+            pii_id,
+            inv_id,
+            comp_id,
+            name,
+            hsn_code,
+            part_number,
+            desc_val,
+            qty,
+            unit,
+            price,
+            discount,
+            float(item.get("tax_rate") or 18.0),
+            float(item.get("cgst_amount") or 0.0),
+            float(item.get("sgst_amount") or 0.0),
+            float(item.get("igst_amount") or 0.0),
+            item_total,
+            now
+        ])
+            
+        # 3. Individual Purchase Orders Record for audit and reporting
         queries.append(
             """INSERT INTO purchase_orders (id, po_number, supplier_name, component_id, component_name, component_category, quantity, unit_cost, total_cost, purchased_by, purchased_by_name, invoice_ref, status, created_at, purchased_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'delivered', ?, ?)"""
@@ -1762,6 +2185,7 @@ async def confirm_purchase(req: PurchaseConfirmRequest, user=Depends(require_adm
         
         return {
             "success": True,
+            "invoice_id": inv_id,
             "metrics": {
                 "imported": imported,
                 "updated": updated,

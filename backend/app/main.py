@@ -1,5 +1,6 @@
 from fastapi.responses import StreamingResponse
 import os
+import sys
 import re
 import uuid
 import json
@@ -93,9 +94,9 @@ REQUESTS_CACHE_LOCK = asyncio.Lock()
 TABLES_META_CACHE = TTLMemCache(ttl=300)
 SCHEMA_CACHE = TTLMemCache(ttl=300)
 
-# Global locks for thread-safety
-db_lock = asyncio.Lock()
-google_keys_lock = asyncio.Lock()
+# Global locks for thread-safety (lazily initialized on active event loop)
+db_lock: Optional[asyncio.Lock] = None
+google_keys_lock: Optional[asyncio.Lock] = None
 
 # Rate limiting settings
 RATE_LIMIT_REQUESTS = defaultdict(list)
@@ -467,6 +468,68 @@ class SQLiteD1Client:
                     is_used INTEGER DEFAULT 0,
                     created_at VARCHAR(255) NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS suppliers (
+                    id VARCHAR(255) PRIMARY KEY,
+                    name VARCHAR(255) NOT NULL,
+                    gstin VARCHAR(50),
+                    contact_person VARCHAR(255),
+                    email VARCHAR(255),
+                    phone VARCHAR(50),
+                    address TEXT,
+                    city VARCHAR(100),
+                    state VARCHAR(100),
+                    created_at VARCHAR(255),
+                    updated_at VARCHAR(255)
+                );
+                CREATE TABLE IF NOT EXISTS purchase_invoices (
+                    id VARCHAR(255) PRIMARY KEY,
+                    invoice_number VARCHAR(255) NOT NULL,
+                    invoice_date VARCHAR(50),
+                    due_date VARCHAR(50),
+                    po_number VARCHAR(255),
+                    supplier_id VARCHAR(255),
+                    supplier_name VARCHAR(255),
+                    supplier_gstin VARCHAR(50),
+                    subtotal REAL DEFAULT 0.0,
+                    taxable_amount REAL DEFAULT 0.0,
+                    cgst REAL DEFAULT 0.0,
+                    sgst REAL DEFAULT 0.0,
+                    igst REAL DEFAULT 0.0,
+                    total_tax REAL DEFAULT 0.0,
+                    discount REAL DEFAULT 0.0,
+                    round_off REAL DEFAULT 0.0,
+                    grand_total REAL DEFAULT 0.0,
+                    items_count INTEGER DEFAULT 0,
+                    total_units INTEGER DEFAULT 0,
+                    status VARCHAR(50) DEFAULT 'confirmed',
+                    created_by VARCHAR(255),
+                    created_by_name VARCHAR(255),
+                    created_at VARCHAR(255),
+                    updated_at VARCHAR(255)
+                );
+                CREATE TABLE IF NOT EXISTS purchase_invoice_items (
+                    id VARCHAR(255) PRIMARY KEY,
+                    invoice_id VARCHAR(255) NOT NULL,
+                    component_id VARCHAR(255),
+                    item_name VARCHAR(255) NOT NULL,
+                    hsn_code VARCHAR(50),
+                    item_code VARCHAR(100),
+                    description TEXT,
+                    quantity INTEGER NOT NULL,
+                    unit VARCHAR(50) DEFAULT 'pcs',
+                    unit_price REAL NOT NULL,
+                    discount REAL DEFAULT 0.0,
+                    tax_rate REAL DEFAULT 0.0,
+                    cgst_amount REAL DEFAULT 0.0,
+                    sgst_amount REAL DEFAULT 0.0,
+                    igst_amount REAL DEFAULT 0.0,
+                    total_amount REAL NOT NULL,
+                    created_at VARCHAR(255)
+                );
+                CREATE INDEX IF NOT EXISTS idx_suppliers_gstin ON suppliers(gstin);
+                CREATE INDEX IF NOT EXISTS idx_purchase_invoices_gstin_num ON purchase_invoices(supplier_gstin, invoice_number);
+                CREATE INDEX IF NOT EXISTS idx_purchase_invoices_created_at ON purchase_invoices(created_at);
+                CREATE INDEX IF NOT EXISTS idx_purchase_invoice_items_invoice ON purchase_invoice_items(invoice_id);
                 CREATE INDEX IF NOT EXISTS idx_profiles_firebase_uid ON profiles(firebase_uid);
                 CREATE INDEX IF NOT EXISTS idx_profiles_email ON profiles(email);
                 CREATE INDEX IF NOT EXISTS idx_profiles_created_at ON profiles(created_at);
@@ -526,7 +589,7 @@ client: Optional[Any] = None
 db_initialized: bool = False
 
 async def get_db_client() -> Any:
-    global client, db_initialized
+    global client, db_initialized, db_lock
     import sys
     is_testing = os.environ.get("TESTING") == "True" or "pytest" in sys.modules or "unittest" in sys.modules or (len(sys.argv) > 0 and "pytest" in sys.argv[0])
     
@@ -534,6 +597,8 @@ async def get_db_client() -> Any:
         raise HTTPException(status_code=500, detail=f"Database connection failed due to startup error: {startup_error}")
         
     if client is None or not db_initialized:
+        if db_lock is None:
+            db_lock = asyncio.Lock()
         async with db_lock:
             if client is None:
                 if is_testing:
@@ -554,8 +619,10 @@ async def get_db_client() -> Any:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    is_testing = os.environ.get("TESTING") == "True" or "pytest" in sys.modules or "unittest" in sys.modules or (len(sys.argv) > 0 and "pytest" in sys.argv[0])
+
     # Pre-initialize client on startup if lifespan runs and no startup error exists
-    if not startup_error:
+    if not startup_error and not is_testing:
         try:
             await get_db_client()
         except Exception as e:
@@ -564,61 +631,137 @@ async def lifespan(app: FastAPI):
     # Pre-cache PDF banner on startup
     from app.services.pdf_service import get_pdf_banner
     get_pdf_banner()
+
+    # Log OCR and PDF Engine Diagnostics on startup
+    try:
+        from app.api.routes.import_data import log_ocr_diagnostics
+        log_ocr_diagnostics()
+    except Exception as e:
+        print(f"[Lifespan Diagnostics Warning] OCR diagnostics failed: {e}")
     
     # Create indexes for optimal date queries and to avoid full table scans
     try:
-        await db_execute("CREATE INDEX IF NOT EXISTS idx_profiles_firebase_uid ON profiles(firebase_uid)")
-        await db_execute("CREATE INDEX IF NOT EXISTS idx_profiles_email ON profiles(email)")
-        await db_execute("CREATE INDEX IF NOT EXISTS idx_profiles_created_at ON profiles(created_at)")
-        await db_execute("CREATE INDEX IF NOT EXISTS idx_requests_student_id ON requests(student_id)")
-        await db_execute("CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status)")
-        await db_execute("CREATE INDEX IF NOT EXISTS idx_requests_component_id ON requests(component_id)")
-        await db_execute("CREATE INDEX IF NOT EXISTS idx_requests_requested_at ON requests(requested_at)")
-        await db_execute("""
-            CREATE TABLE IF NOT EXISTS reminder_logs (
-                id VARCHAR(255) PRIMARY KEY,
-                student_id VARCHAR(255),
-                reminder_date VARCHAR(255),
-                reminder_type VARCHAR(255)
-            )
-        """)
-        await db_execute("""
-            CREATE TABLE IF NOT EXISTS notifications (
-                id VARCHAR(255) PRIMARY KEY,
-                user_id VARCHAR(255),
-                title VARCHAR(255),
-                message TEXT,
-                type VARCHAR(255),
-                is_read INTEGER DEFAULT 0,
-                link_url VARCHAR(255),
-                created_at VARCHAR(255)
-            )
-        """)
-        await db_execute("""
-            CREATE TABLE IF NOT EXISTS audit_logs (
-                id VARCHAR(255) PRIMARY KEY,
-                user_id VARCHAR(255),
-                action VARCHAR(255),
-                details TEXT,
-                created_at VARCHAR(255)
-            )
-        """)
-        await db_execute("""
-            CREATE TABLE IF NOT EXISTS otp_verifications (
-                id VARCHAR(255) PRIMARY KEY,
-                email VARCHAR(255) NOT NULL,
-                otp_hash VARCHAR(255) NOT NULL,
-                expires_at VARCHAR(255) NOT NULL,
-                attempts INTEGER DEFAULT 0,
-                is_used INTEGER DEFAULT 0,
-                created_at VARCHAR(255) NOT NULL
-            )
-        """)
-        await db_execute("CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications(user_id)")
-        await db_execute("CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id)")
-        await db_execute("CREATE INDEX IF NOT EXISTS idx_reminder_logs_lookup ON reminder_logs(student_id, reminder_date, reminder_type)")
-        await db_execute("CREATE INDEX IF NOT EXISTS idx_otp_email ON otp_verifications(email)")
-        print("[Lifespan] D1 database date indexes and tables verified/created successfully.")
+        if not is_testing:
+            await db_execute("CREATE INDEX IF NOT EXISTS idx_profiles_firebase_uid ON profiles(firebase_uid)")
+            await db_execute("CREATE INDEX IF NOT EXISTS idx_profiles_email ON profiles(email)")
+            await db_execute("CREATE INDEX IF NOT EXISTS idx_profiles_created_at ON profiles(created_at)")
+            await db_execute("CREATE INDEX IF NOT EXISTS idx_requests_student_id ON requests(student_id)")
+            await db_execute("CREATE INDEX IF NOT EXISTS idx_requests_status ON requests(status)")
+            await db_execute("CREATE INDEX IF NOT EXISTS idx_requests_component_id ON requests(component_id)")
+            await db_execute("CREATE INDEX IF NOT EXISTS idx_requests_requested_at ON requests(requested_at)")
+            await db_execute("""
+                CREATE TABLE IF NOT EXISTS reminder_logs (
+                    id VARCHAR(255) PRIMARY KEY,
+                    student_id VARCHAR(255),
+                    reminder_date VARCHAR(255),
+                    reminder_type VARCHAR(255)
+                )
+            """)
+            await db_execute("""
+                CREATE TABLE IF NOT EXISTS notifications (
+                    id VARCHAR(255) PRIMARY KEY,
+                    user_id VARCHAR(255),
+                    title VARCHAR(255),
+                    message TEXT,
+                    type VARCHAR(255),
+                    is_read INTEGER DEFAULT 0,
+                    link_url VARCHAR(255),
+                    created_at VARCHAR(255)
+                )
+            """)
+            await db_execute("""
+                CREATE TABLE IF NOT EXISTS audit_logs (
+                    id VARCHAR(255) PRIMARY KEY,
+                    user_id VARCHAR(255),
+                    action VARCHAR(255),
+                    details TEXT,
+                    created_at VARCHAR(255)
+                )
+            """)
+            await db_execute("""
+                CREATE TABLE IF NOT EXISTS otp_verifications (
+                    id VARCHAR(255) PRIMARY KEY,
+                    email VARCHAR(255) NOT NULL,
+                    otp_hash VARCHAR(255) NOT NULL,
+                    expires_at VARCHAR(255) NOT NULL,
+                    attempts INTEGER DEFAULT 0,
+                    is_used INTEGER DEFAULT 0,
+                    created_at VARCHAR(255) NOT NULL
+                )
+            """)
+            await db_execute("CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications(user_id)")
+            await db_execute("CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id)")
+            await db_execute("CREATE INDEX IF NOT EXISTS idx_reminder_logs_lookup ON reminder_logs(student_id, reminder_date, reminder_type)")
+            await db_execute("CREATE INDEX IF NOT EXISTS idx_otp_email ON otp_verifications(email)")
+            await db_execute("""
+                CREATE TABLE IF NOT EXISTS suppliers (
+                    id VARCHAR(255) PRIMARY KEY,
+                    name VARCHAR(255) NOT NULL,
+                    gstin VARCHAR(50),
+                    contact_person VARCHAR(255),
+                    email VARCHAR(255),
+                    phone VARCHAR(50),
+                    address TEXT,
+                    city VARCHAR(100),
+                    state VARCHAR(100),
+                    created_at VARCHAR(255),
+                    updated_at VARCHAR(255)
+                )
+            """)
+            await db_execute("""
+                CREATE TABLE IF NOT EXISTS purchase_invoices (
+                    id VARCHAR(255) PRIMARY KEY,
+                    invoice_number VARCHAR(255) NOT NULL,
+                    invoice_date VARCHAR(50),
+                    due_date VARCHAR(50),
+                    po_number VARCHAR(255),
+                    supplier_id VARCHAR(255),
+                    supplier_name VARCHAR(255),
+                    supplier_gstin VARCHAR(50),
+                    subtotal REAL DEFAULT 0.0,
+                    taxable_amount REAL DEFAULT 0.0,
+                    cgst REAL DEFAULT 0.0,
+                    sgst REAL DEFAULT 0.0,
+                    igst REAL DEFAULT 0.0,
+                    total_tax REAL DEFAULT 0.0,
+                    discount REAL DEFAULT 0.0,
+                    round_off REAL DEFAULT 0.0,
+                    grand_total REAL DEFAULT 0.0,
+                    items_count INTEGER DEFAULT 0,
+                    total_units INTEGER DEFAULT 0,
+                    status VARCHAR(50) DEFAULT 'confirmed',
+                    created_by VARCHAR(255),
+                    created_by_name VARCHAR(255),
+                    created_at VARCHAR(255),
+                    updated_at VARCHAR(255)
+                )
+            """)
+            await db_execute("""
+                CREATE TABLE IF NOT EXISTS purchase_invoice_items (
+                    id VARCHAR(255) PRIMARY KEY,
+                    invoice_id VARCHAR(255) NOT NULL,
+                    component_id VARCHAR(255),
+                    item_name VARCHAR(255) NOT NULL,
+                    hsn_code VARCHAR(50),
+                    item_code VARCHAR(100),
+                    description TEXT,
+                    quantity INTEGER NOT NULL,
+                    unit VARCHAR(50) DEFAULT 'pcs',
+                    unit_price REAL NOT NULL,
+                    discount REAL DEFAULT 0.0,
+                    tax_rate REAL DEFAULT 0.0,
+                    cgst_amount REAL DEFAULT 0.0,
+                    sgst_amount REAL DEFAULT 0.0,
+                    igst_amount REAL DEFAULT 0.0,
+                    total_amount REAL NOT NULL,
+                    created_at VARCHAR(255)
+                )
+            """)
+            await db_execute("CREATE INDEX IF NOT EXISTS idx_suppliers_gstin ON suppliers(gstin)")
+            await db_execute("CREATE INDEX IF NOT EXISTS idx_purchase_invoices_gstin_num ON purchase_invoices(supplier_gstin, invoice_number)")
+            await db_execute("CREATE INDEX IF NOT EXISTS idx_purchase_invoices_created_at ON purchase_invoices(created_at)")
+            await db_execute("CREATE INDEX IF NOT EXISTS idx_purchase_invoice_items_invoice ON purchase_invoice_items(invoice_id)")
+            print("[Lifespan] D1 database date indexes and tables verified/created successfully.")
     except Exception as e:
         print(f"[Lifespan Warning] Could not verify/create D1 indexes/tables: {e}")
     
@@ -636,7 +779,7 @@ app = FastAPI(title="EI HUB API", description="Python FastAPI Backend for EI HUB
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 # Enable CORS
-allowed_origins_env = os.environ.get("ALLOWED_ORIGINS")
+allowed_origins_env = os.environ.get("ALLOWED_ORIGINS") or os.environ.get("CORS_ORIGINS")
 default_origins = [
     "http://localhost:3000",
     "http://localhost:5173",
@@ -690,8 +833,9 @@ async def rate_limit_middleware(request: Request, call_next):
     # Lazy inline rate-limit cleanup to maintain bounded memory on serverless
     prune_expired_rate_limits()
 
-    # Exclude API documentation and standard schema endpoints from limit
-    if request.url.path in ["/docs", "/redoc", "/openapi.json"]:
+    # Exclude during unit testing, API documentation and standard schema endpoints from limit
+    is_testing = os.environ.get("TESTING") == "True" or "pytest" in sys.modules or "unittest" in sys.modules or (len(sys.argv) > 0 and "pytest" in sys.argv[0])
+    if is_testing or request.url.path in ["/docs", "/redoc", "/openapi.json"]:
         return await call_next(request)
         
     vercel_ip = request.headers.get("x-vercel-forwarded-for")
@@ -959,11 +1103,13 @@ security = HTTPBearer()
 GOOGLE_KEYS = {}
 
 async def get_google_public_key(kid: str) -> str:
-    global GOOGLE_KEYS
+    global GOOGLE_KEYS, google_keys_lock
     # Fast path if key is already cached
     if kid in GOOGLE_KEYS:
         return GOOGLE_KEYS[kid]
         
+    if google_keys_lock is None:
+        google_keys_lock = asyncio.Lock()
     async with google_keys_lock:
         # Double check cache inside lock
         if kid in GOOGLE_KEYS:
@@ -1471,11 +1617,28 @@ async def verify_otp(data: dict = Body(...)):
 async def health_check():
     if startup_error:
         print(f"[Health Check Alert] Internal startup error logged: {startup_error}")
+    
+    ocr_status = {}
+    try:
+        from app.api.routes.import_data import is_tesseract_available, is_poppler_available, get_tesseract_languages, pytesseract
+        tess_avail = is_tesseract_available()
+        ocr_status = {
+            "tesseract_available": tess_avail,
+            "tesseract_version": str(pytesseract.get_tesseract_version()) if tess_avail else None,
+            "languages": get_tesseract_languages() if tess_avail else [],
+            "poppler_available": is_poppler_available(),
+            "os": os.name,
+            "platform": sys.platform
+        }
+    except Exception as e:
+        ocr_status = {"error": str(e)}
+
     return {
         "status": "error" if startup_error else "ok",
         "healthy": startup_error is None,
         "firebase_configured": firebase_initialized,
-        "database_connected": client is not None and db_initialized
+        "database_connected": client is not None and db_initialized,
+        "ocr": ocr_status
     }
 
 @app.get("/api/components")

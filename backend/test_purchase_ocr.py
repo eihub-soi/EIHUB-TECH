@@ -1,8 +1,11 @@
+import os
+import sys
+
+os.environ["TESTING"] = "True"
+
 import unittest
 import asyncio
 import io
-import sys
-import os
 from unittest.mock import patch, AsyncMock
 from fastapi.testclient import TestClient
 
@@ -179,10 +182,19 @@ class TestPurchaseOCR(unittest.TestCase):
         res_json = response.json()
         self.assertTrue(res_json["success"])
         
-        # Verify batched SQL executions (1 Component Update, 1 Component Insert, 2 Purchase Orders Inserts)
+        # Verify batched SQL executions (1 Invoice Insert, 1 Comp Update, 1 Comp Insert, 2 Invoice Item Inserts, 2 PO Inserts)
         self.assertTrue(mock_batch.called)
         statements = mock_batch.call_args[0][0]
-        self.assertEqual(len(statements), 4)
+        self.assertEqual(len(statements), 7)
+        
+        # Verify purchase_invoices insert
+        inv_inserts = [s for s in statements if "INSERT INTO purchase_invoices" in s.sql]
+        self.assertEqual(len(inv_inserts), 1)
+        self.assertEqual(inv_inserts[0].args[1], "INV-2026-9876")
+        
+        # Verify purchase_invoice_items inserts
+        item_inserts = [s for s in statements if "INSERT INTO purchase_invoice_items" in s.sql]
+        self.assertEqual(len(item_inserts), 2)
         
         # Find update stock query
         update_comp_stmt = next(s for s in statements if "UPDATE components" in s.sql)
@@ -318,7 +330,11 @@ class TestPurchaseOCR(unittest.TestCase):
         self.assertEqual(eval3["status"], "✓ VERIFIED NEW")
         self.assertIsNone(eval3["possible_match"])
 
-    def test_purchase_ocr_access_control(self):
+    @patch("app.api.routes.import_data.db_query")
+    @patch("app.api.routes.import_data.perform_ocr_sync")
+    def test_purchase_ocr_access_control(self, mock_ocr, mock_db):
+        mock_ocr.return_value = "TAX INVOICE\nGrand Total: 100\n"
+        mock_db.return_value = []
         # Admin is permitted to run purchase OCR
         self.mock_user["role"] = "admin"
         file = {"file": ("invoice.png", io.BytesIO(b"dummy image data"), "image/png")}
@@ -330,6 +346,133 @@ class TestPurchaseOCR(unittest.TestCase):
         response = self.client.post("/api/imports/purchase/ocr", files=file)
         self.assertEqual(response.status_code, 403)
         self.assertIn("Access Denied", response.json()["detail"])
+
+    @patch("app.api.routes.import_data.db_query")
+    @patch("app.api.routes.import_data.perform_ocr_sync")
+    def test_purchase_ocr_tax_breakdown_cgst_sgst(self, mock_ocr, mock_db_query):
+        mock_ocr.return_value = (
+            "TAX INVOICE\n"
+            "Supplier: RoboTech Components India Pvt Ltd\n"
+            "GSTIN: 27AABCU9603R1ZN\n"
+            "Invoice No: RT-2026-0045\n"
+            "Date: 15/09/2026\n"
+            "Due Date: 15/10/2026\n"
+            "P.O. Number: PO-8877\n"
+            "\n"
+            "Raspberry Pi Pico 20 380.00 7600.00\n"
+            "Subtotal: 7,600.00\n"
+            "CGST @ 9%: 684.00\n"
+            "SGST @ 9%: 684.00\n"
+            "Grand Total: 8,968.00\n"
+        )
+        mock_db_query.return_value = []
+        file = {"file": ("invoice.pdf", io.BytesIO(b"%PDF-1.4 dummy"), "application/pdf")}
+        response = self.client.post("/api/imports/purchase/ocr", files=file)
+        self.assertEqual(response.status_code, 200)
+        res = response.json()
+        self.assertTrue(res["success"])
+        meta = res["metadata"]
+        self.assertEqual(meta["supplier_name"], "RoboTech Components India Pvt Ltd")
+        self.assertEqual(meta["supplier_gst"], "27AABCU9603R1ZN")
+        self.assertEqual(meta["due_date"], "15/10/2026")
+        self.assertEqual(meta["cgst"], 684.0)
+        self.assertEqual(meta["sgst"], 684.0)
+        self.assertEqual(meta["grand_total"], 8968.0)
+        self.assertIn("confidence", meta)
+        self.assertGreater(meta["confidence"]["overall"], 75)
+
+    @patch("app.api.routes.import_data.db_query")
+    @patch("app.api.routes.import_data.perform_ocr_sync")
+    def test_purchase_ocr_tax_breakdown_igst(self, mock_ocr, mock_db_query):
+        mock_ocr.return_value = (
+            "INTERSTATE TAX INVOICE\n"
+            "Vendor: Silicon Bay Semiconductors\n"
+            "GSTIN: 29AAGCB2212P1ZR\n"
+            "Bill No: SB-9901\n"
+            "Date: 01/10/2026\n"
+            "\n"
+            "STM32 Nucleo Board 10 1100.00 11000.00\n"
+            "Subtotal: 11,000.00\n"
+            "IGST @ 18%: 1,980.00\n"
+            "Discount: 500.00\n"
+            "Round off: -0.50\n"
+            "Grand Total: 12,479.50\n"
+        )
+        mock_db_query.return_value = []
+        file = {"file": ("bill.jpg", io.BytesIO(b"dummy jpg"), "image/jpeg")}
+        response = self.client.post("/api/imports/purchase/ocr", files=file)
+        self.assertEqual(response.status_code, 200)
+        res = response.json()
+        meta = res["metadata"]
+        self.assertEqual(meta["igst"], 1980.0)
+        self.assertEqual(meta["discount"], 500.0)
+        self.assertEqual(meta["grand_total"], 12479.5)
+
+    @patch("app.api.routes.import_data.db_query")
+    def test_duplicate_invoice_rejection_in_confirm(self, mock_db_query):
+        # Mock database returning an existing invoice
+        mock_db_query.return_value = [
+            {"id": "inv-existing-123", "invoice_number": "INV-EXISTING-99", "supplier_name": "ABC Tech"}
+        ]
+        payload = {
+            "metadata": {
+                "supplier_name": "ABC Tech",
+                "invoice_number": "INV-EXISTING-99",
+                "grand_total": 500.0
+            },
+            "line_items": [
+                {
+                    "item_name": "Jumper Wires",
+                    "quantity": 10,
+                    "unit_price": 50.0,
+                    "category": "Accessories"
+                }
+            ]
+        }
+        # Attempting to confirm duplicate invoice without allow_duplicate must return 409 Conflict
+        response = self.client.post("/api/imports/purchase/confirm", json=payload)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("Duplicate Invoice", response.json()["detail"])
+
+    @patch("app.api.routes.import_data.db_query")
+    @patch("app.api.routes.import_data.db_batch")
+    @patch("app.api.routes.import_data.log_activity")
+    def test_purchase_confirm_40_plus_line_items(self, mock_log, mock_batch, mock_db_query):
+        mock_db_query.return_value = []
+        
+        # Construct 45 line items
+        items = []
+        for i in range(1, 46):
+            items.append({
+                "item_name": f"Electronic Component #{i}",
+                "hsn_code": f"8542{i:04d}",
+                "quantity": i,
+                "unit": "pcs",
+                "unit_price": 25.0,
+                "category": "Passives"
+            })
+            
+        payload = {
+            "metadata": {
+                "supplier_name": "Bulk Electronics Corp",
+                "invoice_number": "BULK-45-INV",
+                "grand_total": sum(it["quantity"] * it["unit_price"] for it in items),
+                "po_number": "PO-BULK-100"
+            },
+            "line_items": items
+        }
+        
+        response = self.client.post("/api/imports/purchase/confirm", json=payload)
+        self.assertEqual(response.status_code, 200)
+        res = response.json()
+        self.assertTrue(res["success"])
+        self.assertEqual(res["metrics"]["imported"], 45)
+        self.assertEqual(res["metrics"]["stock_units_added"], sum(range(1, 46)))
+        
+        # Verify batched SQL executions: 1 invoice + 45 component inserts + 45 invoice item inserts + 45 PO inserts = 136 statements
+        self.assertTrue(mock_batch.called)
+        statements = mock_batch.call_args[0][0]
+        self.assertEqual(len(statements), 1 + 45 * 3)
 
 if __name__ == "__main__":
     unittest.main()
