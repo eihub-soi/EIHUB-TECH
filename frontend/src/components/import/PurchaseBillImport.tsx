@@ -58,7 +58,13 @@ interface InvoiceMetadata {
   discount: number;
   round_off: number;
   grand_total: number;
+  printed_grand_total?: number | null;
+  calculated_grand_total?: number | null;
   calculated_total?: number;
+  has_discrepancy?: boolean;
+  discrepancy_amount?: number;
+  discrepancies?: string[];
+  fields?: Record<string, any>;
   confidence?: Record<string, number>;
   uncertain_fields?: string[];
   is_duplicate?: boolean;
@@ -81,21 +87,27 @@ interface InvoiceMetadata {
 interface ComponentRow {
   id: string;
   item_name: string;
+  original_item_name?: string;
   hsn_code: string;
   part_number: string;
   category: string;
   description: string;
   features?: string;
   quantity: number;
+  raw_quantity?: number | null;
   unit: string;
   unit_price: number;
+  raw_unit_price?: number | null;
   discount: number;
   tax_rate: number;
   cgst_amount?: number;
   sgst_amount?: number;
   igst_amount?: number;
   total: number;
+  raw_total?: number | null;
+  calculated_total?: number | null;
   confidence_score: number;
+  field_confidences?: Record<string, number>;
   errors: string[];
   warnings: string[];
   status: string;
@@ -303,7 +315,13 @@ export const PurchaseBillImport: React.FC = () => {
         discount: meta.discount || 0,
         round_off: meta.round_off || 0,
         grand_total: meta.grand_total || 0,
-        calculated_total: meta.calculated_total || 0,
+        printed_grand_total: meta.printed_grand_total ?? meta.grand_total ?? null,
+        calculated_grand_total: meta.calculated_grand_total ?? meta.calculated_total ?? null,
+        calculated_total: meta.calculated_total || meta.calculated_grand_total || 0,
+        has_discrepancy: !!meta.has_discrepancy,
+        discrepancy_amount: meta.discrepancy_amount ?? 0,
+        discrepancies: meta.discrepancies || [],
+        fields: meta.fields || {},
         confidence: meta.confidence || {},
         uncertain_fields: meta.uncertain_fields || [],
         is_duplicate: !!meta.is_duplicate,
@@ -314,10 +332,17 @@ export const PurchaseBillImport: React.FC = () => {
       const parsedItems = (result.line_items || []).map((item: any, idx: number) => ({
         ...item,
         id: item.id || `row-${idx}-${Date.now()}`,
+        original_item_name: item.original_item_name || item.item_name || '',
+        item_name: item.item_name || item.original_item_name || '',
         unit: item.unit || 'pcs',
         hsn_code: item.hsn_code || '',
         discount: item.discount || 0,
         tax_rate: item.tax_rate || 18,
+        raw_quantity: item.raw_quantity,
+        raw_unit_price: item.raw_unit_price,
+        raw_total: item.raw_total,
+        calculated_total: item.calculated_total,
+        field_confidences: item.field_confidences || {},
         selected: true
       }));
 
@@ -605,7 +630,7 @@ export const PurchaseBillImport: React.FC = () => {
             </button>
             <button
               onClick={() => setStep(4)}
-              disabled={hasCriticalErrors || lineItems.filter(r => r.selected).length === 0}
+              disabled={hasCriticalErrors || lineItems.filter(r => r.selected).length === 0 || (totalMismatch && !acknowledgeMismatch)}
               className="px-5 py-2 bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-sm transition-all flex items-center gap-1.5"
             >
               Review &amp; Confirm
@@ -974,16 +999,47 @@ export const PurchaseBillImport: React.FC = () => {
 
             {/* Total Mismatch Warning Alert Banner */}
             {totalMismatch && (
-              <div className="bg-red-50 border border-red-200 rounded-2xl p-4 flex items-start gap-3 shadow-xs">
-                <AlertCircle className="w-5 h-5 text-red-500 mt-0.5 shrink-0" />
-                <div>
-                  <h5 className="font-bold text-red-950 text-sm">Invoice Financial Reconciliation Mismatch</h5>
-                  <p className="text-xs text-red-700 mt-1">
-                    Calculated Total (line items + tax &minus; discount + round-off): <strong>₹{calculatedGrandTotal.toFixed(2)}</strong> does not equal Invoice Grand Total: <strong>₹{metadata.grand_total.toFixed(2)}</strong> (Difference: <strong>₹{Math.abs(calculatedGrandTotal - metadata.grand_total).toFixed(2)}</strong>).
-                  </p>
-                  <p className="text-[11px] text-red-600 mt-1">
-                    Please correct line item amounts or edit invoice header values below.
-                  </p>
+              <div className="bg-red-50 border-2 border-red-300 rounded-2xl p-4 flex items-start gap-3 shadow-xs">
+                <AlertCircle className="w-5 h-5 text-red-600 mt-0.5 shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h5 className="font-extrabold text-red-950 text-sm flex items-center gap-1.5">
+                      Financial Reconciliation Discrepancy Detected
+                    </h5>
+                    <span className="font-mono text-xs font-bold text-red-700 bg-red-100 px-2 py-0.5 rounded-full border border-red-200">
+                      Discrepancy: ₹{Math.abs(calculatedGrandTotal - metadata.grand_total).toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 mt-2.5 p-3 bg-white/80 rounded-xl border border-red-100 text-xs font-mono">
+                    <div>
+                      <span className="text-[10px] text-gray-500 font-sans uppercase font-bold block">Printed on Invoice</span>
+                      <span className="font-black text-gray-900 text-sm">₹{metadata.grand_total.toFixed(2)}</span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-gray-500 font-sans uppercase font-bold block">Calculated (Items + Tax)</span>
+                      <span className="font-black text-sky-700 text-sm">₹{calculatedGrandTotal.toFixed(2)}</span>
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-gray-500 font-sans uppercase font-bold block">Difference</span>
+                      <span className="font-black text-red-600 text-sm">₹{Math.abs(calculatedGrandTotal - metadata.grand_total).toFixed(2)}</span>
+                    </div>
+                  </div>
+                  {metadata.discrepancies && metadata.discrepancies.length > 0 && (
+                    <ul className="list-disc list-inside text-[11px] text-red-800 mt-2 space-y-0.5">
+                      {metadata.discrepancies.map((d, i) => (
+                        <li key={i}>{d}</li>
+                      ))}
+                    </ul>
+                  )}
+                  <label className="mt-2.5 inline-flex items-center gap-2 text-xs font-bold text-red-950 cursor-pointer">
+                    <input 
+                      type="checkbox" 
+                      checked={acknowledgeMismatch}
+                      onChange={(e) => setAcknowledgeMismatch(e.target.checked)}
+                      className="rounded text-red-600 focus:ring-red-500 w-4 h-4"
+                    />
+                    I have verified these amounts against the original document and wish to proceed
+                  </label>
                 </div>
               </div>
             )}
@@ -1021,9 +1077,16 @@ export const PurchaseBillImport: React.FC = () => {
 
               <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3.5">
                 <div className="sm:col-span-2">
-                  <label className="block text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-1">
-                    Supplier / Vendor Name *
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-[11px] font-bold text-gray-500 uppercase tracking-wide">
+                      Supplier / Vendor Name *
+                    </label>
+                    {!metadata.supplier_name && (
+                      <span className="text-[10px] font-bold px-1.5 py-0.2 rounded bg-amber-50 text-amber-700">
+                        Manual Entry Needed
+                      </span>
+                    )}
+                  </div>
                   <input 
                     type="text" 
                     value={metadata.supplier_name}
@@ -1038,13 +1101,17 @@ export const PurchaseBillImport: React.FC = () => {
                     <label className="text-[11px] font-bold text-gray-500 uppercase tracking-wide">
                       Supplier GSTIN
                     </label>
-                    {metadata.supplier_gst && (
+                    {metadata.supplier_gst ? (
                       <span className={`text-[10px] font-bold px-1.5 py-0.2 rounded ${
                         isValidGSTIN(metadata.supplier_gst) 
                           ? 'bg-emerald-50 text-emerald-700' 
                           : 'bg-amber-50 text-amber-700'
                       }`}>
                         {isValidGSTIN(metadata.supplier_gst) ? '✓ Valid' : 'Format check'}
+                      </span>
+                    ) : (
+                      <span className="text-[10px] font-medium px-1.5 py-0.2 rounded bg-gray-100 text-gray-500">
+                        Not printed / Unregistered
                       </span>
                     )}
                   </div>
@@ -1101,9 +1168,16 @@ export const PurchaseBillImport: React.FC = () => {
 
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
                 <div>
-                  <label className="block text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-1">
-                    Invoice Number *
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-[11px] font-bold text-gray-500 uppercase tracking-wide">
+                      Invoice Number *
+                    </label>
+                    {!metadata.invoice_number && (
+                      <span className="text-[10px] font-bold px-1.5 py-0.2 rounded bg-red-50 text-red-700">
+                        Required
+                      </span>
+                    )}
+                  </div>
                   <input 
                     type="text" 
                     value={metadata.invoice_number}
@@ -1114,9 +1188,16 @@ export const PurchaseBillImport: React.FC = () => {
                 </div>
 
                 <div>
-                  <label className="block text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-1">
-                    Invoice Date *
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-[11px] font-bold text-gray-500 uppercase tracking-wide">
+                      Invoice Date *
+                    </label>
+                    {!metadata.invoice_date && (
+                      <span className="text-[10px] font-bold px-1.5 py-0.2 rounded bg-red-50 text-red-700">
+                        Required
+                      </span>
+                    )}
+                  </div>
                   <input 
                     type="text" 
                     value={metadata.invoice_date}
@@ -1242,6 +1323,11 @@ export const PurchaseBillImport: React.FC = () => {
                               onChange={e => handleCellEdit(actualIdx, 'item_name', e.target.value)}
                               className="w-full px-2 py-1 rounded-lg border border-transparent hover:border-gray-200 focus:border-sky-500 bg-transparent focus:bg-white text-xs font-semibold"
                             />
+                            {item.original_item_name && (
+                              <p className="text-[10px] text-gray-500 font-mono px-2 mt-0.5 truncate" title={item.original_item_name}>
+                                <span className="text-gray-400 font-sans font-medium">Source:</span> {item.original_item_name}
+                              </p>
+                            )}
                             {item.warnings && item.warnings.length > 0 && (
                               <p className="text-[10px] text-amber-600 font-medium px-2 mt-0.5">
                                 {item.warnings.join(", ")}
@@ -1345,9 +1431,10 @@ export const PurchaseBillImport: React.FC = () => {
                                       setLineItems(updated);
                                       setTimeout(handleVerify, 100);
                                     }}
-                                    className="px-1.5 py-0.5 bg-emerald-600 hover:bg-emerald-700 text-white text-[9px] font-bold rounded"
+                                    className="px-2 py-0.5 bg-emerald-600 hover:bg-emerald-700 text-white text-[9px] font-bold rounded shadow-2xs"
+                                    title="Link to existing inventory catalog component"
                                   >
-                                    Accept
+                                    Link Catalog
                                   </button>
                                   <button
                                     onClick={() => {
@@ -1359,9 +1446,10 @@ export const PurchaseBillImport: React.FC = () => {
                                       };
                                       setLineItems(updated);
                                     }}
-                                    className="px-1.5 py-0.5 bg-gray-500 hover:bg-gray-600 text-white text-[9px] font-bold rounded"
+                                    className="px-2 py-0.5 bg-gray-500 hover:bg-gray-600 text-white text-[9px] font-bold rounded shadow-2xs"
+                                    title="Keep verbatim invoice description as a new component"
                                   >
-                                    Treat as New
+                                    Keep Description
                                   </button>
                                 </div>
                               </div>
@@ -1558,7 +1646,7 @@ export const PurchaseBillImport: React.FC = () => {
 
               <button
                 onClick={() => setStep(4)}
-                disabled={hasCriticalErrors || lineItems.filter(r => r.selected).length === 0}
+                disabled={hasCriticalErrors || lineItems.filter(r => r.selected).length === 0 || (totalMismatch && !acknowledgeMismatch)}
                 className="px-6 py-2.5 bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-md transition-all flex items-center gap-2"
               >
                 Proceed to Confirmation

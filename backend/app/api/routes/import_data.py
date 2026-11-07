@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends, File, UploadFile
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from pydantic import BaseModel
 import asyncio
 import io
@@ -611,9 +611,23 @@ import os
 import io
 import uuid
 import difflib
+import numpy as np
+from decimal import Decimal, ROUND_HALF_UP
 from concurrent.futures import ThreadPoolExecutor
 from pdf2image import convert_from_bytes
-from PIL import Image, ImageEnhance, ImageFilter
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+
+# Helper for exact decimal conversions
+def to_decimal(val) -> Optional[Decimal]:
+    if val is None or str(val).strip() in ("", "None", "null", "nan"):
+        return None
+    try:
+        cleaned = re.sub(r'[^\d\.\-]', '', str(val))
+        if not cleaned:
+            return None
+        return Decimal(cleaned).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    except Exception:
+        return None
 
 # Limit concurrent OCR workers to avoid CPU starvation
 ocr_executor = ThreadPoolExecutor(max_workers=4)
@@ -861,51 +875,140 @@ def get_mock_image_to_data() -> Dict[str, Any]:
         'word_num': list(range(len(text_list)))
     }
 
+def deskew_image(img: Image.Image) -> Tuple[Image.Image, float]:
+    """
+    Detects skew angle in range [-10.0, 10.0] degrees using Projection Profile Variance.
+    Utilizes local high-pass filtering to isolate text strokes from illumination gradients.
+    Rotates image to level horizontal text lines.
+    """
+    try:
+        thumb = img.convert('L')
+        w, h = thumb.size
+        scale = min(800.0 / max(w, h), 1.0)
+        target_w = max(int(w * scale), 20)
+        target_h = max(int(h * scale), 20)
+        thumb = thumb.resize((target_w, target_h), Image.Resampling.BILINEAR)
+        
+        # High-pass filter: subtract local mean blur to isolate text strokes from shadows
+        blur = thumb.filter(ImageFilter.BoxBlur(10))
+        hp = np.array(thumb, dtype=float) - np.array(blur, dtype=float)
+        binary = np.where(hp < -5, 255, 0).astype(np.uint8)
+        
+        best_angle = 0.0
+        best_var = -1.0
+        for a in np.arange(-10.0, 10.5, 0.5):
+            test_img = Image.fromarray(binary).rotate(float(a), resample=Image.Resampling.BILINEAR, fillcolor=0)
+            proj = np.sum(np.array(test_img), axis=1)
+            var = float(np.var(proj))
+            if var > best_var:
+                best_var = var
+                best_angle = float(a)
+                
+        if abs(best_angle) >= 0.5:
+            return img.rotate(best_angle, resample=Image.Resampling.BICUBIC, expand=True, fillcolor=255), best_angle
+    except Exception as e:
+        print(f"[OCR Deskew] Skew detection skipped: {e}")
+    return img, 0.0
+
 def auto_orient_image(img: Image.Image, is_pdf: bool = False) -> Image.Image:
-    """Detects and fixes orientation using EXIF tags and Tesseract OSD for photos."""
+    """Detects and fixes orientation using EXIF tags and Tesseract OSD for photos and scanned documents."""
     try:
         from PIL import ImageOps
         img = ImageOps.exif_transpose(img)
     except Exception:
         pass
-    if not is_pdf:
-        try:
-            if is_tesseract_available():
-                osd = pytesseract.image_to_osd(img, output_type=pytesseract.Output.DICT)
-                conf = float(osd.get('orientation_conf', 0.0))
-                rot = int(osd.get('rotate', 0))
-                # Only apply OSD rotation if confidence is reliable and rotation is needed
-                if conf >= 5.0 and rot in (90, 180, 270):
-                    img = img.rotate(360 - rot, expand=True)
-        except Exception:
-            pass
+    try:
+        if is_tesseract_available():
+            osd = pytesseract.image_to_osd(img, output_type=pytesseract.Output.DICT)
+            conf = float(osd.get('orientation_conf', 0.0))
+            rot = int(osd.get('rotate', 0))
+            if conf >= 2.0 and rot in (90, 180, 270):
+                img = img.rotate(360 - rot, expand=True)
+    except Exception:
+        pass
     return img
 
 def get_preprocessed_images(img: Image.Image) -> Dict[str, Image.Image]:
-    """Generates five image variants for OCR evaluation."""
+    """Generates distinct image preprocessing variants for multi-pass comparative evaluation."""
     versions = {}
     img_gray = img.convert("L")
     w, h = img.size
     
-    # Version E: Original high-resolution (but grayscale)
+    # 1. Base Grayscale (Original resolution)
     versions['version_e'] = img_gray
+    versions['raw_grayscale'] = img_gray
     
-    # Version A: Grayscale + 2x resize (default/primary)
-    versions['version_a'] = img_gray.resize((w * 2, h * 2), Image.Resampling.LANCZOS)
-    
-    # Version B: Grayscale + contrast enhancement (1.5x)
-    versions['version_b'] = ImageEnhance.Contrast(img_gray).enhance(1.5)
-    
-    # Version D: Sharpened
+    # 2. Standard Enhanced: Grayscale + Autocontrast + Sharpening (Version A)
+    try:
+        auto_c = ImageOps.autocontrast(img_gray, cutoff=1)
+        resized_a = auto_c.resize((int(w * 1.5), int(h * 1.5)), Image.Resampling.BILINEAR)
+        versions['version_a'] = resized_a.filter(ImageFilter.SHARPEN)
+        versions['standard_enhanced'] = versions['version_a']
+    except Exception:
+        versions['version_a'] = img_gray.resize((w * 2, h * 2), Image.Resampling.LANCZOS)
+        versions['standard_enhanced'] = versions['version_a']
+        
+    # 3. High Contrast: Grayscale + 1.6x contrast + sharpen (Version B)
+    try:
+        enhanced = ImageEnhance.Contrast(img_gray).enhance(1.6)
+        versions['version_b'] = enhanced.filter(ImageFilter.SHARPEN)
+        versions['high_contrast'] = versions['version_b']
+    except Exception:
+        versions['version_b'] = img_gray
+        versions['high_contrast'] = img_gray
+        
+    # 4. Sharpened only (Version D)
     versions['version_d'] = img_gray.filter(ImageFilter.SHARPEN)
     
-    # Version C: Grayscale + resize (2x) + binarization threshold (pure PIL, fallback-free)
+    # 5. Otsu Global Binarization with 3x3 Median Noise Filter (Version C)
     try:
-        img_resized = img_gray.resize((img_gray.width * 2, img_gray.height * 2), Image.Resampling.LANCZOS)
-        thresh = img_resized.point(lambda p: 255 if p > 127 else 0)
-        versions['version_c'] = thresh
+        denoised = img_gray.filter(ImageFilter.MedianFilter(size=3))
+        work_img = denoised.resize((int(w * 1.5), int(h * 1.5)), Image.Resampling.BILINEAR) if w < 2000 else denoised
+        arr = np.array(work_img)
+        hist, _ = np.histogram(arr, bins=256, range=(0, 256))
+        total = arr.size
+        current_max = 0.0
+        threshold = 127
+        sum_total = np.dot(np.arange(256), hist)
+        sum_b = 0.0
+        w_b = 0.0
+        for t in range(256):
+            w_b += hist[t]
+            if w_b == 0:
+                continue
+            w_f = total - w_b
+            if w_f == 0:
+                break
+            sum_b += t * hist[t]
+            m_b = sum_b / w_b
+            m_f = (sum_total - sum_b) / w_f
+            between_var = w_b * w_f * ((m_b - m_f) ** 2)
+            if between_var > current_max:
+                current_max = between_var
+                threshold = t
+        otsu_bin = np.where(arr > threshold, 255, 0).astype(np.uint8)
+        versions['version_c'] = Image.fromarray(otsu_bin)
+        versions['otsu_filtered'] = versions['version_c']
     except Exception as e:
-        print(f"[OCR Preprocessing] PIL threshold binarization failed: {e}")
+        print(f"[OCR Preprocessing] Otsu threshold failed: {e}")
+        try:
+            img_resized = img_gray.resize((img_gray.width * 2, img_gray.height * 2), Image.Resampling.LANCZOS)
+            thresh = img_resized.point(lambda p: 255 if p > 127 else 0)
+            versions['version_c'] = thresh
+            versions['otsu_filtered'] = thresh
+        except Exception:
+            pass
+            
+    # 6. Adaptive Local Neighborhood Thresholding (Handles shadows and gradient illumination)
+    try:
+        work_img = img_gray.resize((int(w * 1.5), int(h * 1.5)), Image.Resampling.BILINEAR) if w < 2000 else img_gray
+        blurred = work_img.filter(ImageFilter.BoxBlur(15))
+        arr_orig = np.array(work_img, dtype=np.int16)
+        arr_blur = np.array(blurred, dtype=np.int16)
+        thresh_local = np.where(arr_orig > (arr_blur - 10), 255, 0).astype(np.uint8)
+        versions['adaptive_thresh'] = Image.fromarray(thresh_local)
+    except Exception as e:
+        print(f"[OCR Preprocessing] Adaptive threshold failed: {e}")
         
     return versions
 
@@ -913,6 +1016,7 @@ def parse_ocr_coordinates(raw_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Reconstructs invoice text rows and table columns using coordinate data.
     Groups words vertically into rows and splits them into column buckets horizontally.
+    Preserves exact original OCR strings, confidence, and avoids assuming missing numbers.
     """
     words = []
     n_boxes = len(raw_data.get('text', []))
@@ -929,25 +1033,46 @@ def parse_ocr_coordinates(raw_data: Dict[str, Any]) -> Dict[str, Any]:
                 'conf': conf
             })
             
-    # Group words into vertical rows based on dynamic overlap
-    rows = []
-    for w in sorted(words, key=lambda x: x['top']):
-        placed = False
-        w_center = w['top'] + w['height'] / 2.0
-        for r in rows:
-            r_top = min(item['top'] for item in r)
-            r_bottom = max(item['top'] + item['height'] for item in r)
-            r_height = r_bottom - r_top
-            r_center = r_top + r_height / 2.0
-            
-            # overlap threshold: 60% of the maximum height of the word or row
-            tolerance = max(w['height'], r_height) * 0.6
-            if abs(w_center - r_center) < tolerance:
-                r.append(w)
-                placed = True
-                break
-        if not placed:
-            rows.append([w])
+    # Group words into lines using Tesseract's native layout blocks when available,
+    # or fallback to fixed-anchor coordinate grouping to prevent cross-line chaining.
+    has_tess_lines = (
+        'line_num' in raw_data and 
+        'block_num' in raw_data and 
+        'par_num' in raw_data and 
+        len(raw_data['line_num']) == n_boxes
+    )
+    
+    if has_tess_lines:
+        line_dict = {}
+        for i in range(n_boxes):
+            txt = str(raw_data['text'][i]).strip()
+            conf = float(raw_data['conf'][i]) if 'conf' in raw_data else 100.0
+            if txt and conf >= 0:
+                key = (int(raw_data['block_num'][i]), int(raw_data['par_num'][i]), int(raw_data['line_num'][i]))
+                line_dict.setdefault(key, []).append({
+                    'text': txt,
+                    'left': int(raw_data['left'][i]),
+                    'top': int(raw_data['top'][i]),
+                    'width': int(raw_data['width'][i]),
+                    'height': int(raw_data['height'][i]),
+                    'conf': conf
+                })
+        rows = [words for _, words in sorted(line_dict.items(), key=lambda item: min(w['top'] for w in item[1]))]
+    else:
+        rows = []
+        for w in sorted(words, key=lambda x: x['top']):
+            placed = False
+            w_center = w['top'] + w['height'] / 2.0
+            for r in rows:
+                anchor = r[0]
+                a_center = anchor['top'] + anchor['height'] / 2.0
+                tolerance = anchor['height'] * 0.6
+                if abs(w_center - a_center) < tolerance:
+                    r.append(w)
+                    placed = True
+                    break
+            if not placed:
+                rows.append([w])
             
     for r in rows:
         r.sort(key=lambda x: x['left'])
@@ -1087,9 +1212,9 @@ def parse_ocr_coordinates(raw_data: Dict[str, Any]) -> Dict[str, Any]:
         def clean_numeric(val_str):
             return re.sub(r'[^\d\.\-]', '', val_str)
             
-        qty_val = 0
-        price_val = 0.0
-        total_val = 0.0
+        qty_val = None
+        price_val = None
+        total_val = None
         
         qty_clean = clean_numeric(qty_str)
         if qty_clean:
@@ -1115,14 +1240,37 @@ def parse_ocr_coordinates(raw_data: Dict[str, Any]) -> Dict[str, Any]:
             all_confs.extend(v)
         avg_conf = sum(all_confs) / len(all_confs) if all_confs else 100.0
         
+        calc_row_total = round(qty_val * price_val, 2) if (qty_val is not None and price_val is not None) else None
+        
+        field_confs = {
+            'item_name': sum(row_confs['item_name']) / len(row_confs['item_name']) if row_confs['item_name'] else 0.0,
+            'quantity': sum(row_confs['quantity']) / len(row_confs['quantity']) if row_confs['quantity'] else 0.0,
+            'unit_price': sum(row_confs['unit_price']) / len(row_confs['unit_price']) if row_confs['unit_price'] else 0.0,
+            'total': sum(row_confs['total']) / len(row_confs['total']) if row_confs['total'] else 0.0,
+            'hsn': sum(row_confs['hsn']) / len(row_confs['hsn']) if row_confs['hsn'] else 0.0,
+        }
+        
         parsed_items.append({
+            'original_item_name': item_name_str,
             'item_name': item_name_str,
-            'quantity': qty_val,
+            'quantity': qty_val if qty_val is not None else 0,
+            'raw_quantity': qty_val,
             'unit': unit_str or 'pcs',
-            'unit_price': price_val,
-            'total': total_val,
+            'unit_price': price_val if price_val is not None else 0.0,
+            'raw_unit_price': price_val,
+            'total': total_val if total_val is not None else (calc_row_total if calc_row_total is not None else 0.0),
+            'raw_total': total_val,
+            'calculated_total': calc_row_total,
             'hsn': hsn_str,
             'confidence_score': avg_conf,
+            'field_confidences': field_confs,
+            'fields': {
+                'item_name': {'value': item_name_str, 'raw_text': " ".join(row_data['item_name']), 'confidence': field_confs['item_name'], 'validation_status': 'VALID' if item_name_str else 'MISSING'},
+                'quantity': {'value': qty_val, 'raw_text': qty_str, 'confidence': field_confs['quantity'], 'validation_status': 'VALID' if (qty_val is not None and qty_val > 0) else 'MISSING'},
+                'unit_price': {'value': price_val, 'raw_text': price_str, 'confidence': field_confs['unit_price'], 'validation_status': 'VALID' if (price_val is not None and price_val >= 0) else 'MISSING'},
+                'total': {'value': total_val, 'raw_text': total_str, 'confidence': field_confs['total'], 'validation_status': 'VALID' if total_val is not None else 'MISSING'},
+                'hsn': {'value': hsn_str or None, 'raw_text': hsn_str, 'confidence': field_confs['hsn'], 'validation_status': 'VALID' if hsn_str else 'MISSING'},
+            },
             'original_row_text': " ".join([w['text'] for w in row_words])
         })
         
@@ -1132,23 +1280,23 @@ def parse_ocr_coordinates(raw_data: Dict[str, Any]) -> Dict[str, Any]:
         'all_row_texts': all_row_texts
     }
 
-def score_ocr_result(parsed_data: Dict[str, Any], target_grand_total: float) -> float:
-    """Evaluates the structural and logical quality of a candidate OCR pass."""
+def score_ocr_result(parsed_data: Dict[str, Any], target_grand_total: float = 0.0, raw_text: str = "") -> float:
+    """Evaluates the structural and logical quality of a candidate OCR pass using verifiable evidence."""
     score = 0.0
     if parsed_data.get('header_found'):
-        score += 100.0
+        score += 120.0
         
     line_items = parsed_data.get('raw_rows', [])
-    score += len(line_items) * 10.0
+    score += min(len(line_items) * 15.0, 150.0)
     
     consistent_rows = 0
     for item in line_items:
-        qty = item.get('quantity', 0)
-        rate = item.get('unit_price', 0.0)
-        tot = item.get('total', 0.0)
-        if qty > 0 and rate > 0 and abs((qty * rate) - tot) < 2.0:
+        qty = item.get('raw_quantity') or item.get('quantity', 0)
+        rate = item.get('raw_unit_price') or item.get('unit_price', 0.0)
+        tot = item.get('raw_total') or item.get('total', 0.0)
+        if qty and rate and tot and abs((qty * rate) - tot) <= 1.0:
             consistent_rows += 1
-    score += consistent_rows * 30.0
+    score += consistent_rows * 40.0
     
     confs = [item.get('confidence_score', 100.0) for item in line_items]
     if confs:
@@ -1157,6 +1305,14 @@ def score_ocr_result(parsed_data: Dict[str, Any], target_grand_total: float) -> 
     calc_total = sum(item.get('total', 0.0) for item in line_items)
     if target_grand_total > 0 and abs(calc_total - target_grand_total) < 5.0:
         score += 50.0
+
+    if raw_text:
+        # Check valid Indian GSTIN pattern (with optional OCR inter-character spacing)
+        if re.search(r"\b[0-9]{2}[\s\-]?[A-Z]{5}[\s\-]?[0-9]{4}[\s\-]?[A-Z]{1}[\s\-]?[1-9A-Z]{1}[\s\-]?[Z2][\s\-]?[0-9A-Z]{1}\b", raw_text):
+            score += 60.0
+        # Check alphanumeric ratio to penalize unreadable garbage symbol output
+        alnum_chars = sum(1 for c in raw_text if c.isalnum() or c.isspace() or c in ".,:-/₹")
+        score += (alnum_chars / max(len(raw_text), 1)) * 40.0
         
     return score
 
@@ -1228,13 +1384,20 @@ def determine_category(name: str, invoice_cat: Optional[str] = None, existing_ca
 
 async def evaluate_line_item(item: Dict[str, Any], comp_map: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Performs multi-level matching (exact, case, whitespace, fuzzy) against Components DB
-    and computes confidence, warnings, errors, and status.
+    Performs multi-level matching (exact, case, whitespace, fuzzy) against Components DB.
+    Preserves verbatim invoice description without overwriting. Uses exact decimal calculations.
     """
     name = item.get("item_name", "").strip()
-    qty = int(item.get("quantity", 0))
-    price = float(item.get("unit_price", 0.0))
-    row_total = float(item.get("total", 0.0))
+    original_name = item.get("original_item_name") or name
+    qty = int(item.get("quantity") or 0)
+    raw_qty = item.get("raw_quantity")
+    if raw_qty is None:
+        raw_qty = qty if qty > 0 else None
+    price = float(item.get("unit_price") or 0.0)
+    raw_price = item.get("raw_unit_price")
+    if raw_price is None:
+        raw_price = price if price >= 0 else None
+    row_total = float(item.get("total") or 0.0)
     category = item.get("category", "").strip()
     conf_score = float(item.get("confidence_score", 100.0))
     is_accepted_as_new = item.get("accepted_as_new", False)
@@ -1243,10 +1406,11 @@ async def evaluate_line_item(item: Dict[str, Any], comp_map: Dict[str, Dict[str,
     warnings = []
     status = "NEW"
     possible_match = None
+    matched_component = None
     existing_id = None
     old_stock = 0
     
-    # Validate required fields
+    # Absolute extraction validations
     if not name:
         errors.append("Component name is required")
     if qty <= 0:
@@ -1254,10 +1418,16 @@ async def evaluate_line_item(item: Dict[str, Any], comp_map: Dict[str, Dict[str,
     if price < 0:
         errors.append("Price cannot be negative")
         
-    # Check row-level math
-    expected = qty * price
-    if abs(expected - row_total) > 2.0:
-        warnings.append(f"Row total mismatch: expected ₹{expected:.2f}, got ₹{row_total:.2f}")
+    # Check row-level math using exact Decimal arithmetic
+    try:
+        qty_d = Decimal(str(qty))
+        price_d = Decimal(str(price))
+        expected_d = (qty_d * price_d).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        tot_d = Decimal(str(row_total)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        if abs(expected_d - tot_d) > Decimal('0.50'):
+            warnings.append(f"Row total mismatch: expected ₹{expected_d:.2f}, got ₹{tot_d:.2f}")
+    except Exception:
+        pass
         
     # Multi-level DB Matching
     norm = normalize_name(name)
@@ -1278,11 +1448,22 @@ async def evaluate_line_item(item: Dict[str, Any], comp_map: Dict[str, Dict[str,
         existing_id = matched_db_comp["id"]
         old_stock = matched_db_comp["total_stock"]
         category = determine_category(name, category, matched_db_comp["category"])
+        matched_component = {
+            "id": matched_db_comp["id"],
+            "name": matched_db_comp["name"],
+            "category": matched_db_comp.get("category", ""),
+            "stock": old_stock,
+            "similarity": 100.0,
+            "match_type": "EXACT"
+        }
         return {
             **item,
+            "original_item_name": original_name,
+            "item_name": name,  # Absolute Rule 3: NEVER overwrite invoice description
             "errors": errors,
             "warnings": warnings,
             "status": status,
+            "matched_component": matched_component,
             "existing_id": existing_id,
             "old_stock": old_stock,
             "new_stock": old_stock + qty,
@@ -1305,7 +1486,10 @@ async def evaluate_line_item(item: Dict[str, Any], comp_map: Dict[str, Dict[str,
         possible_match = {
             "id": best_match["id"],
             "name": best_match["name"],
-            "similarity": round(best_sim * 100, 1)
+            "category": best_match.get("category", ""),
+            "stock": best_match.get("total_stock", 0),
+            "similarity": round(best_sim * 100, 1),
+            "match_type": "FUZZY"
         }
         warnings.append(f"Fuzzy match found: '{best_match['name']}' ({possible_match['similarity']}% similarity)")
     else:
@@ -1329,10 +1513,13 @@ async def evaluate_line_item(item: Dict[str, Any], comp_map: Dict[str, Dict[str,
         
     return {
         **item,
+        "original_item_name": original_name,
+        "item_name": name,  # Absolute Rule 8: Never overwrite invoice description with fuzzy matches
         "errors": errors,
         "warnings": warnings,
         "status": status,
         "possible_match": possible_match,
+        "matched_component": matched_component,
         "existing_id": None,
         "old_stock": 0,
         "new_stock": qty,
@@ -1346,13 +1533,15 @@ async def evaluate_line_item(item: Dict[str, Any], comp_map: Dict[str, Dict[str,
 # -------------------------------------------------------------------------
 
 def perform_ocr_sync(content: bytes, is_pdf: bool) -> Dict[str, Any]:
-    """Runs coordinate-aware document analysis pipeline."""
+    """
+    Runs multi-pass coordinate-aware document analysis pipeline with orientation
+    correction, deskewing, noise filtering, and multi-page comparative scoring.
+    """
     # Step 1: Attempt Text-Based PDF extraction (if selectable PDF text is available)
     if is_pdf:
         words = extract_words_from_pdf_text(content)
         if words and len(words) >= 10:
             print(f"[PDF Parser] Extracted {len(words)} characters/words. Reconstructing coordinates...")
-            # Mock image_to_data format structure
             raw_data = {
                 'text': [w['text'] for w in words],
                 'left': [w['left'] for w in words],
@@ -1362,7 +1551,6 @@ def perform_ocr_sync(content: bytes, is_pdf: bool) -> Dict[str, Any]:
                 'conf': [w['conf'] for w in words]
             }
             parsed = parse_ocr_coordinates(raw_data)
-            # Reconstruct dummy text block for regex metadata matches
             parsed['raw_text'] = "\n".join(parsed['all_row_texts'])
             return parsed
             
@@ -1378,15 +1566,14 @@ def perform_ocr_sync(content: bytes, is_pdf: bool) -> Dict[str, Any]:
         parsed['ocr_note'] = "PRODUCTION OCR CREDENTIALS REQUIRED. Manual entry fallback active."
         return parsed
 
-        
     pages = []
     if is_pdf:
         try:
             pop_path = get_poppler_path()
             if pop_path:
-                pages = convert_from_bytes(content, poppler_path=pop_path)
+                pages = convert_from_bytes(content, dpi=300, poppler_path=pop_path)
             else:
-                pages = convert_from_bytes(content)
+                pages = convert_from_bytes(content, dpi=300)
         except Exception as e:
             print(f"[OCR Converter] Poppler conversion failed: {e}")
     else:
@@ -1396,46 +1583,38 @@ def perform_ocr_sync(content: bytes, is_pdf: bool) -> Dict[str, Any]:
             print(f"[OCR Open Image] Image open failed: {e}")
             
     if not pages:
-        # Final fallback to mock if conversion fails entirely
         raw_data = get_mock_image_to_data()
         parsed = parse_ocr_coordinates(raw_data)
         parsed['raw_text'] = "\n".join(parsed['all_row_texts'])
         return parsed
 
-    # Auto-orient each page (handles smartphone camera EXIF tags)
-    pages = [auto_orient_image(p, is_pdf=is_pdf) for p in pages]
+    # Auto-orient and deskew each page
+    processed_pages = []
+    for p in pages:
+        p_oriented = auto_orient_image(p, is_pdf=is_pdf)
+        p_deskewed, detected_skew = deskew_image(p_oriented)
+        processed_pages.append(p_deskewed)
+    pages = processed_pages
         
     all_pages_rows = []
     all_raw_texts = []
     
-    # Run candidate selection on Page 1 to optimize multi-page latency
+    # Run candidate comparative selection on Page 1 to determine winning preprocessing strategy
     p1 = pages[0]
     p1_versions = get_preprocessed_images(p1)
     
-    # Search metadata grand total for scoring validation if possible
-    temp_txt = ""
-    try:
-        res = pytesseract.image_to_string(p1_versions['version_a'], lang='eng')
-        if isinstance(res, str):
-            temp_txt = res
-        elif isinstance(res, bytes):
-            temp_txt = res.decode('utf-8')
-    except Exception:
-        pass
-    tot_match = re.search(r"(?i)(?:grand\s*total|total\s*amount|amount\s*payable|net\s*payable)[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})", temp_txt)
-    target_gt = float(tot_match.group(1).replace(",", "")) if tot_match else 0.0
-    
-    # Evaluate candidates
+    # Candidate preprocessing strategies to compare
     candidates = [
-        ('version_a', '--psm 6'),
-        ('version_c', '--psm 6'),
-        ('version_b', '--psm 11'),
-        ('version_a', '--psm 11'),
-        ('version_d', '--psm 6'),
-        ('version_e', '--psm 12'),
+        ('standard_enhanced', '--psm 6'),
+        ('adaptive_thresh', '--psm 6'),
+        ('otsu_filtered', '--psm 6'),
+        ('high_contrast', '--psm 6'),
+        ('raw_grayscale', '--psm 6'),
     ]
     
-    best_ver = 'version_a'
+    best_ver = 'standard_enhanced'
+    if best_ver not in p1_versions:
+        best_ver = 'raw_grayscale'
     best_config = '--psm 6'
     best_score = -1.0
     
@@ -1445,14 +1624,12 @@ def perform_ocr_sync(content: bytes, is_pdf: bool) -> Dict[str, Any]:
         try:
             raw_data = pytesseract.image_to_data(p1_versions[ver_name], lang='eng', config=config, output_type=pytesseract.Output.DICT)
             parsed = parse_ocr_coordinates(raw_data)
-            score = score_ocr_result(parsed, target_gt)
+            candidate_text = "\n".join(parsed.get('all_row_texts', []))
+            score = score_ocr_result(parsed, raw_text=candidate_text)
             if score > best_score:
                 best_score = score
                 best_ver = ver_name
                 best_config = config
-            # High-confidence quick break
-            if parsed.get('header_found') and len(parsed.get('raw_rows', [])) > 2:
-                break
         except Exception as e:
             print(f"[OCR Trial] Pass {ver_name} {config} failed: {e}")
             
@@ -1461,7 +1638,7 @@ def perform_ocr_sync(content: bytes, is_pdf: bool) -> Dict[str, Any]:
     # Process all pages with the chosen best configuration parameters
     for idx, page in enumerate(pages):
         page_versions = get_preprocessed_images(page)
-        img_to_use = page_versions.get(best_ver, page_versions['version_a'])
+        img_to_use = page_versions.get(best_ver, page_versions.get('version_a', page))
         try:
             raw_data = pytesseract.image_to_data(img_to_use, lang='eng', config=best_config, output_type=pytesseract.Output.DICT)
             parsed_page = parse_ocr_coordinates(raw_data)
@@ -1562,7 +1739,7 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
     lines = [str(x) for x in lines_val] if isinstance(lines_val, list) else []
     
     # Metadata Regex Extraction rules
-    gstin_pattern = re.compile(r"\b([0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}[Z2][0-9A-Z]{1})\b")
+    gstin_pattern = re.compile(r"\b([0-9]{2}[\s\-]?[A-Z]{5}[\s\-]?[0-9]{4}[\s\-]?[A-Z]{1}[\s\-]?[1-9A-Z]{1}[\s\-]?[Z2][\s\-]?[0-9A-Z]{1})\b")
     invoice_pattern = re.compile(r"(?i)\b(?:invoice|bill|inv)\b(?:\s*(?:no\.?|number|#|nox))?[\t :.\-]+[\t ]*([a-zA-Z0-9\-\/]+)")
     date_pattern = re.compile(r"(?i)(?:date|dt)[\t ]*[:.]?[\t ]*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})")
     due_date_pattern = re.compile(r"(?i)(?:due\s*date|due\s*dt|payment\s*due)[\t ]*[:.]?[\t ]*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})")
@@ -1570,19 +1747,21 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
     total_pattern = re.compile(r"(?i)(?:grand\s*total|total\s*amount|amount\s*payable|net\s*payable)[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
     subtotal_pattern = re.compile(r"(?i)(?:subtotal|sub-total|total\s*before\s*tax)[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
     taxable_pattern = re.compile(r"(?i)(?:taxable\s*amount|taxable\s*value|taxable\s*val)[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
-    gst_tax_pattern = re.compile(r"(?i)(?:cgst|sgst|igst|gst|tax\s*amount)[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
-    cgst_pattern = re.compile(r"(?i)(?:cgst|central\s*tax|central\s*gst)[\t ]*(?:@[\t ]*\d+(?:\.\d+)?%)?[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
-    sgst_pattern = re.compile(r"(?i)(?:sgst|state\s*tax|state\s*gst|utgst)[\t ]*(?:@[\t ]*\d+(?:\.\d+)?%)?[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
-    igst_pattern = re.compile(r"(?i)(?:igst|integrated\s*tax|integrated\s*gst)[\t ]*(?:@[\t ]*\d+(?:\.\d+)?%)?[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
+    gst_tax_pattern = re.compile(r"(?i)(?:\btotal\s*tax\b|\bgst\s*tax\b|\b(?<![csi])gst\b|\btax\s*amount\b)[\t ]*(?:(?:@|at)?[\t ]*\d+(?:\.\d+)?%?)?[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
+    cgst_pattern = re.compile(r"(?i)(?:cgst|central\s*tax|central\s*gst)[\t ]*(?:(?:@|at)?[\t ]*\d+(?:\.\d+)?%?)?[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
+    sgst_pattern = re.compile(r"(?i)(?:sgst|state\s*tax|state\s*gst|utgst)[\t ]*(?:(?:@|at)?[\t ]*\d+(?:\.\d+)?%?)?[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
+    igst_pattern = re.compile(r"(?i)(?:igst|integrated\s*tax|integrated\s*gst)[\t ]*(?:(?:@|at)?[\t ]*\d+(?:\.\d+)?%?)?[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
     discount_pattern = re.compile(r"(?i)(?:discount|disc)[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
     round_off_pattern = re.compile(r"(?i)(?:round\s*off|roundoff)[\t ]*[:.]?[\t ]*([+-]?[0-9,]+\.[0-9]{2})")
     
     gst_match = gstin_pattern.search(raw_text)
-    supplier_gst = normalize_gstin_ocr(gst_match.group(1)) if gst_match else ""
+    raw_gst_match = gst_match.group(0) if gst_match else ""
+    supplier_gst = normalize_gstin_ocr(gst_match.group(1)) if gst_match else None
     if not supplier_gst:
         # Check labeled GSTIN with optional internal spacing from OCR
         labeled_gst = re.search(r"(?i)\b(?:gstin|gst\s*no|gst\s*number|gst)[\t :.\-]+[\t ]*([0-9a-zA-Z\s]{15,18})\b", raw_text)
         if labeled_gst:
+            raw_gst_match = labeled_gst.group(0)
             cleaned = re.sub(r'[^0-9a-zA-Z]', '', labeled_gst.group(1)).upper()
             if len(cleaned) == 16 and "2Z" in cleaned:
                 cleaned = cleaned.replace("2Z", "Z")
@@ -1590,41 +1769,50 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
                 supplier_gst = normalize_gstin_ocr(cleaned)
     
     inv_match = invoice_pattern.search(raw_text)
-    invoice_number = inv_match.group(1).strip() if inv_match else ""
-    if invoice_number.lower() in ['no', 'number', 'x', '']:
+    raw_inv_match = inv_match.group(0) if inv_match else ""
+    invoice_number = inv_match.group(1).strip() if inv_match else None
+    if invoice_number and invoice_number.lower() in ['no', 'number', 'x', '', 'date', 'tax', 'original', 'invoice']:
         fallback_inv = re.search(r"(?i)(?:invoice|bill|inv)[\s\w.:#-]*?([A-Z0-9]{2,}[-][A-Z0-9\-_/]+)", raw_text)
         if fallback_inv:
+            raw_inv_match = fallback_inv.group(0)
             invoice_number = fallback_inv.group(1).strip()
+        else:
+            invoice_number = None
     
     dt_match = date_pattern.search(raw_text)
-    invoice_date = dt_match.group(1).strip() if dt_match else ""
+    raw_date_match = dt_match.group(0) if dt_match else ""
+    invoice_date = dt_match.group(1).strip() if dt_match else None
     
     due_match = due_date_pattern.search(raw_text)
-    due_date = due_match.group(1).strip() if due_match else ""
+    raw_due_match = due_match.group(0) if due_match else ""
+    due_date = due_match.group(1).strip() if due_match else None
     
     po_match = po_pattern.search(raw_text)
-    po_number = po_match.group(1).strip() if po_match else ""
+    raw_po_match = po_match.group(0) if po_match else ""
+    po_number = po_match.group(1).strip() if po_match else None
     
     tot_match = total_pattern.search(raw_text)
-    grand_total = float(tot_match.group(1).replace(",", "")) if tot_match else 0.0
+    raw_tot_match = tot_match.group(0) if tot_match else ""
+    printed_grand_total = float(tot_match.group(1).replace(",", "")) if tot_match else None
     
     sub_match = subtotal_pattern.search(raw_text)
-    subtotal = float(sub_match.group(1).replace(",", "")) if sub_match else 0.0
+    raw_sub_match = sub_match.group(0) if sub_match else ""
+    printed_subtotal = float(sub_match.group(1).replace(",", "")) if sub_match else None
     
     taxable_match = taxable_pattern.search(raw_text)
-    taxable_amount = float(taxable_match.group(1).replace(",", "")) if taxable_match else 0.0
+    taxable_amount = float(taxable_match.group(1).replace(",", "")) if taxable_match else None
     
     tax_match = gst_tax_pattern.search(raw_text)
-    gst_tax = float(tax_match.group(1).replace(",", "")) if tax_match else 0.0
+    gst_tax = float(tax_match.group(1).replace(",", "")) if tax_match else None
     
     cgst_match = cgst_pattern.search(raw_text)
-    cgst = float(cgst_match.group(1).replace(",", "")) if cgst_match else 0.0
+    cgst = float(cgst_match.group(1).replace(",", "")) if cgst_match else None
     
     sgst_match = sgst_pattern.search(raw_text)
-    sgst = float(sgst_match.group(1).replace(",", "")) if sgst_match else 0.0
+    sgst = float(sgst_match.group(1).replace(",", "")) if sgst_match else None
     
     igst_match = igst_pattern.search(raw_text)
-    igst = float(igst_match.group(1).replace(",", "")) if igst_match else 0.0
+    igst = float(igst_match.group(1).replace(",", "")) if igst_match else None
     
     disc_match = discount_pattern.search(raw_text)
     discount = float(disc_match.group(1).replace(",", "")) if disc_match else 0.0
@@ -1632,40 +1820,43 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
     round_match = round_off_pattern.search(raw_text)
     round_off = float(round_match.group(1).replace(",", "")) if round_match else 0.0
     
-    # Financial reconciliation adjustments
-    if gst_tax == 0.0 and (cgst > 0 or sgst > 0 or igst > 0):
-        gst_tax = cgst + sgst + igst
-    elif gst_tax > 0 and cgst == 0 and sgst == 0 and igst == 0:
-        # Default symmetric 50-50 split between CGST and SGST for intra-state
-        cgst = round(gst_tax / 2.0, 2)
-        sgst = round(gst_tax - cgst, 2)
-        
-    if taxable_amount == 0.0 and subtotal > 0.0:
-        taxable_amount = subtotal
+    # Financial reconciliation adjustments without guessing
+    if cgst is not None or sgst is not None or igst is not None:
+        component_tax = (cgst or 0.0) + (sgst or 0.0) + (igst or 0.0)
+        if gst_tax is None or abs(gst_tax - component_tax) > 0.01:
+            gst_tax = component_tax
     
     # Heuristic Supplier Name detection
-    supplier_name = ""
+    supplier_name = None
+    raw_supplier_match = ""
     for line in lines[:10]:
-        if any(lbl in line.lower() for lbl in ["supplier:", "vendor:", "from:", "seller:", "sold by:"]):
-            match = re.search(r'(?i)(?:supplier|vendor|from|seller|sold\s*by)[:\s]+(.+)', line)
+        if any(lbl in line.lower() for lbl in ["supplier:", "vendor:", "from:", "seller:", "sold by:", "billed by:"]):
+            match = re.search(r'(?i)(?:supplier|vendor|from|seller|sold\s*by|billed\s*by)[:\s]+(.+)', line)
             if match:
-                supplier_name = match.group(1).strip()
-                break
+                cand = match.group(1).strip()
+                if len(cand) > 2 and not re.search(r'^\d+$', cand):
+                    supplier_name = cand
+                    raw_supplier_match = line
+                    break
     if not supplier_name and lines:
         for line in lines[:5]:
-            if any(lbl in line.lower() for lbl in ["invoice", "tax invoice", "bill", "delivery challan", "cash memo"]):
+            clean_l = line.strip()
+            if any(lbl in clean_l.lower() for lbl in ["invoice", "tax invoice", "bill", "delivery challan", "cash memo", "gstin", "date:"]):
                 continue
-            if len(line) > 3 and not re.search(r'\d{4,}', line):
-                supplier_name = line
+            if len(clean_l) > 3 and not re.search(r'\d{4,}', clean_l) and not clean_l.startswith(('No.', '#', 'Ph:', 'Tel:')):
+                supplier_name = clean_l
+                raw_supplier_match = clean_l
                 break
                 
     warnings = []
     if not supplier_gst:
-        warnings.append("GSTIN not found")
+        warnings.append("GSTIN not found or invalid in invoice")
     if not invoice_number:
-        warnings.append("Invoice number not found")
+        warnings.append("Invoice number not found in invoice")
     if not invoice_date:
-        warnings.append("Invoice date not found")
+        warnings.append("Invoice date not found in invoice")
+    if not supplier_name:
+        warnings.append("Supplier name not identified in invoice")
         
     # Check for duplicate invoice in database
     is_duplicate = False
@@ -1679,7 +1870,7 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
             if dup_records and any("invoice_number" in r or "invoice_ref" in r for r in dup_records):
                 is_duplicate = True
                 dup_rec = dup_records[0]
-                dup_sup = dup_rec.get("supplier_name", supplier_name)
+                dup_sup = dup_rec.get("supplier_name", supplier_name or "Unknown")
                 dup_msg = f"Duplicate Invoice Alert: Invoice '{invoice_number}' (Supplier: {dup_sup}) already exists in the purchase register."
                 warnings.insert(0, dup_msg)
                 duplicate_info = {
@@ -1733,19 +1924,21 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
         "invoice_number": 95 if invoice_number else 0,
         "invoice_date": 95 if invoice_date else 0,
         "due_date": 90 if due_date else 0,
-        "grand_total": 95 if grand_total > 0 else 0,
-        "subtotal": 90 if subtotal > 0 else 0,
-        "tax": 90 if gst_tax > 0 else 0,
+        "grand_total": 95 if printed_grand_total is not None and printed_grand_total > 0 else 0,
+        "subtotal": 90 if printed_subtotal is not None and printed_subtotal > 0 else 0,
+        "tax": 90 if gst_tax is not None and gst_tax > 0 else 0,
         "overall": 92
     }
     uncertain_fields = []
+    if not supplier_name:
+        uncertain_fields.append("supplier_name")
     if not supplier_gst:
         uncertain_fields.append("supplier_gst")
     if not invoice_number:
         uncertain_fields.append("invoice_number")
     if not invoice_date:
         uncertain_fields.append("invoice_date")
-    if grand_total <= 0:
+    if printed_grand_total is None or printed_grand_total <= 0:
         uncertain_fields.append("grand_total")
         
     # Reconstruct/merge wrap-around description lines
@@ -1771,6 +1964,8 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
             # Wrap description text into previous item row description
             if final_raw_rows and not any(k in final_raw_rows[-1]['item_name'].lower() for k in ["total", "subtotal"]):
                 final_raw_rows[-1]['item_name'] += " " + name
+                if 'original_item_name' in final_raw_rows[-1]:
+                    final_raw_rows[-1]['original_item_name'] += " " + name
                 final_raw_rows[-1]['confidence_score'] = min(final_raw_rows[-1]['confidence_score'], r['confidence_score'])
                 
     # Separate component rows from non-component expense rows
@@ -1788,14 +1983,15 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
     
     for idx, r in enumerate(final_raw_rows):
         name = r['item_name']
+        orig_name = r.get('original_item_name') or name
         
         # Skip total summary lines in actual component arrays
         if any(k in name.lower() for k in ["subtotal", "sub-total", "grand total", "total amount", "amount payable", "net payable"]):
             # Use total summary to verify metadata if not yet found
-            if grand_total == 0.0 and any(k in name.lower() for k in ["grand total", "amount payable", "net payable"]):
-                grand_total = r['total']
-            if subtotal == 0.0 and "sub" in name.lower():
-                subtotal = r['total']
+            if printed_grand_total is None and any(k in name.lower() for k in ["grand total", "amount payable", "net payable"]):
+                printed_grand_total = r['total']
+            if printed_subtotal is None and "sub" in name.lower():
+                printed_subtotal = r['total']
             continue
             
         is_excluded = any(kw in name.lower() for kw in NON_COMPONENT_KEYWORDS)
@@ -1807,30 +2003,36 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
             if hsn_match:
                 hsn_val = hsn_match.group(1)
         
-        # Convert to component row dictionary
+        # Convert to component row dictionary preserving verbatim description & raw values
         item_dict = {
             "id": f"ocr-item-{idx}",
+            "original_item_name": orig_name,
             "item_name": name,
             "part_number": "",
             "hsn_code": hsn_val,
             "category": "Select Category",
-            "description": "Imported via Purchase Bill OCR",
+            "description": f"Invoice Item: {orig_name}",
             "features": "",
             "quantity": r['quantity'],
+            "raw_quantity": r.get('raw_quantity'),
             "unit": r.get('unit') or 'pcs',
             "unit_price": r['unit_price'],
+            "raw_unit_price": r.get('raw_unit_price'),
             "discount": 0.0,
-            "tax_rate": 18.0 if gst_tax > 0 else 0.0,
+            "tax_rate": 18.0 if (gst_tax is not None and gst_tax > 0) else 0.0,
             "total": r['total'] if r['total'] > 0 else (r['quantity'] * r['unit_price']),
+            "raw_total": r.get('raw_total'),
+            "calculated_total": r.get('calculated_total'),
             "confidence_score": r['confidence_score'],
+            "field_confidences": r.get('field_confidences', {}),
+            "fields": r.get('fields', {}),
             "accepted_as_new": False
         }
         
-        # Run classification and evaluation
+        # Run classification and evaluation without overwriting description
         evaluated = await evaluate_line_item(item_dict, comp_map)
         
         if is_excluded:
-            # Change status for excluded line items to represent exclusions
             evaluated["status"] = "EXCLUDED"
             excluded_items.append(evaluated)
         else:
@@ -1843,8 +2045,8 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
         norm = normalize_name(item["item_name"])
         if norm in merged_items:
             existing = merged_items[norm]
-            existing["quantity"] += item["quantity"]
-            existing["total"] += item["total"]
+            existing["quantity"] = (existing.get("quantity") or 0) + (item.get("quantity") or 0)
+            existing["total"] = (existing.get("total") or 0.0) + (item.get("total") or 0.0)
             # Re-verify and recalculate stock numbers
             existing_eval = await evaluate_line_item(existing, comp_map)
             existing_eval["warnings"].append(f"Merged duplicate row for '{item['item_name']}'")
@@ -1855,13 +2057,106 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
             
     line_items = list(merged_items.values())
     
-    # Financial Cross-check
-    total_components_cost = sum(item["total"] for item in line_items)
-    total_charges = sum(item["total"] for item in excluded_items)
-    calculated_total = total_components_cost + total_charges + gst_tax - discount
+    # Financial Cross-check using Decimal Arithmetic
+    calc_subtotal_dec = Decimal('0.00')
+    for item in line_items:
+        it_tot = to_decimal(item.get("total"))
+        if it_tot is not None:
+            calc_subtotal_dec += it_tot
+        else:
+            q_d = to_decimal(item.get("quantity"))
+            p_d = to_decimal(item.get("unit_price"))
+            if q_d is not None and p_d is not None:
+                calc_subtotal_dec += (q_d * p_d).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+                
+    calc_charges_dec = Decimal('0.00')
+    for item in excluded_items:
+        ch_tot = to_decimal(item.get("total")) or Decimal('0.00')
+        calc_charges_dec += ch_tot
+        
+    calc_taxable_dec = calc_subtotal_dec + calc_charges_dec
     
-    if grand_total > 0.0 and abs(calculated_total - grand_total) > 5.0:
-        warnings.append(f"Invoice Total Mismatch: Calculated ₹{calculated_total:.2f}, Invoice Grand Total ₹{grand_total:.2f}")
+    cgst_d = to_decimal(cgst) or Decimal('0.00')
+    sgst_d = to_decimal(sgst) or Decimal('0.00')
+    igst_d = to_decimal(igst) or Decimal('0.00')
+    tax_d = to_decimal(gst_tax) if gst_tax is not None else (cgst_d + sgst_d + igst_d)
+    disc_d = to_decimal(discount) or Decimal('0.00')
+    round_d = to_decimal(round_off) or Decimal('0.00')
+    
+    calc_grand_total_dec = (calc_taxable_dec + tax_d - disc_d + round_d).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    
+    # Financial Discrepancy Checks
+    has_discrepancy = False
+    discrepancy_amount = 0.0
+    discrepancies = []
+    
+    if printed_grand_total is not None:
+        printed_gt_dec = to_decimal(printed_grand_total)
+        if printed_gt_dec is not None:
+            diff = abs(printed_gt_dec - calc_grand_total_dec)
+            if diff > Decimal('0.50'):
+                has_discrepancy = True
+                discrepancy_amount = float(diff)
+                diff_msg = f"Grand Total Mismatch: Printed invoice states ₹{printed_gt_dec:.2f}, but sum of line items + taxes is ₹{calc_grand_total_dec:.2f} (Difference: ₹{diff:.2f})"
+                discrepancies.append(diff_msg)
+                warnings.append(diff_msg)
+                
+    if printed_subtotal is not None:
+        printed_sub_dec = to_decimal(printed_subtotal)
+        if printed_sub_dec is not None:
+            diff_sub = abs(printed_sub_dec - calc_subtotal_dec)
+            if diff_sub > Decimal('0.50'):
+                has_discrepancy = True
+                diff_sub_msg = f"Subtotal Mismatch: Printed subtotal is ₹{printed_sub_dec:.2f}, while sum of line items is ₹{calc_subtotal_dec:.2f}"
+                discrepancies.append(diff_sub_msg)
+                warnings.append(diff_sub_msg)
+                
+    if has_discrepancy:
+        uncertain_fields.append("financial_discrepancy")
+        
+    # Structured Field Traces
+    field_traces = {
+        "supplier_name": {
+            "value": supplier_name,
+            "raw_text": raw_supplier_match,
+            "confidence": confidence.get("supplier_name", 0),
+            "validation_status": "VALID" if supplier_name else "MISSING",
+            "is_verified": False,
+            "warning": None if supplier_name else "Supplier name not found in invoice"
+        },
+        "supplier_gst": {
+            "value": supplier_gst,
+            "raw_text": raw_gst_match,
+            "confidence": confidence.get("supplier_gst", 0),
+            "validation_status": "VALID" if supplier_gst else "MISSING",
+            "is_verified": False,
+            "warning": None if supplier_gst else "GSTIN not found or invalid"
+        },
+        "invoice_number": {
+            "value": invoice_number,
+            "raw_text": raw_inv_match,
+            "confidence": confidence.get("invoice_number", 0),
+            "validation_status": "VALID" if invoice_number else "MISSING",
+            "is_verified": False,
+            "warning": None if invoice_number else "Invoice number not found"
+        },
+        "invoice_date": {
+            "value": invoice_date,
+            "raw_text": raw_date_match,
+            "confidence": confidence.get("invoice_date", 0),
+            "validation_status": "VALID" if invoice_date else "MISSING",
+            "is_verified": False,
+            "warning": None if invoice_date else "Invoice date not found"
+        },
+        "grand_total": {
+            "value": printed_grand_total,
+            "raw_text": raw_tot_match,
+            "confidence": confidence.get("grand_total", 0),
+            "validation_status": "VALID" if (printed_grand_total is not None and not has_discrepancy) else ("WARNING" if has_discrepancy else "MISSING"),
+            "is_verified": False,
+            "warning": discrepancies[0] if discrepancies else (None if printed_grand_total is not None else "Grand total not printed on invoice")
+        }
+    }
         
     return {
         "success": True,
@@ -1872,18 +2167,26 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
             "invoice_date": invoice_date,
             "due_date": due_date,
             "po_number": po_number,
-            "grand_total": grand_total if grand_total > 0 else calculated_total,
-            "subtotal": subtotal if subtotal > 0 else total_components_cost,
-            "taxable_amount": taxable_amount if taxable_amount > 0 else total_components_cost,
+            "grand_total": printed_grand_total if printed_grand_total is not None else float(calc_grand_total_dec),
+            "printed_grand_total": printed_grand_total,
+            "calculated_grand_total": float(calc_grand_total_dec),
+            "subtotal": printed_subtotal if printed_subtotal is not None else float(calc_subtotal_dec),
+            "printed_subtotal": printed_subtotal,
+            "calculated_subtotal": float(calc_subtotal_dec),
+            "taxable_amount": taxable_amount if taxable_amount is not None else float(calc_taxable_dec),
             "discount": discount,
-            "gst_tax": gst_tax,
-            "cgst": cgst,
-            "sgst": sgst,
-            "igst": igst,
+            "gst_tax": gst_tax or float(tax_d),
+            "cgst": cgst or float(cgst_d),
+            "sgst": sgst or float(sgst_d),
+            "igst": igst or float(igst_d),
             "round_off": round_off,
-            "calculated_total": calculated_total,
+            "calculated_total": float(calc_grand_total_dec),
+            "has_discrepancy": has_discrepancy,
+            "discrepancy_amount": discrepancy_amount,
+            "discrepancies": discrepancies,
             "confidence": confidence,
             "uncertain_fields": uncertain_fields,
+            "fields": field_traces,
             "is_duplicate": is_duplicate,
             "duplicate_info": duplicate_info,
             "supplier_match": supplier_match
@@ -1963,13 +2266,25 @@ async def confirm_purchase(req: PurchaseConfirmRequest, user=Depends(require_adm
     if not req.line_items:
         raise HTTPException(status_code=400, detail="No line items provided")
         
-    invoice_ref = (req.metadata.get("invoice_number") or "INV-OCR").strip()
-    supplier = (req.metadata.get("supplier_name") or "Unknown Supplier").strip()
+    invoice_ref = (req.metadata.get("invoice_number") or "").strip()
+    supplier = (req.metadata.get("supplier_name") or "").strip()
     supplier_gst = (req.metadata.get("supplier_gst") or "").strip()
     allow_duplicate = req.metadata.get("allow_duplicate", False)
+
+    # Absolute extraction validation: never allow unverified missing invoice or supplier
+    if not invoice_ref or invoice_ref.upper() == "INV-OCR":
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot confirm: A valid invoice number is required. Please verify or enter manually."
+        )
+    if not supplier or supplier.lower() == "unknown supplier":
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot confirm: A valid supplier name is required. Please verify or enter manually."
+        )
     
     # Duplicate Invoice Validation
-    if not allow_duplicate and invoice_ref and invoice_ref != "INV-OCR":
+    if not allow_duplicate and invoice_ref:
         try:
             dup_records = await db_query("SELECT id, invoice_number, supplier_name FROM purchase_invoices WHERE invoice_number = ?", [invoice_ref])
             if dup_records and any("invoice_number" in r for r in dup_records):
