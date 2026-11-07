@@ -46,6 +46,28 @@ export const getAuthHeaders = async (forceRefresh = false): Promise<Record<strin
 };
 
 /**
+ * Resolves the configured backend API base URL from Vite environment.
+ * Trailing slashes are stripped.
+ */
+export const getApiBaseUrl = (): string => {
+  const url = import.meta.env.VITE_API_BASE_URL;
+  return url && typeof url === "string" ? url.trim().replace(/\/+$/, "") : "";
+};
+
+/**
+ * Builds a target API URL by prepending VITE_API_BASE_URL to relative endpoints,
+ * preserving existing absolute URLs.
+ */
+export const buildApiUrl = (endpoint: string): string => {
+  if (endpoint.startsWith("http://") || endpoint.startsWith("https://")) {
+    return endpoint;
+  }
+  const base = getApiBaseUrl();
+  const clean = endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
+  return base ? `${base}${clean}` : clean;
+};
+
+/**
  * Makes an authenticated request to the Python backend
  */
 export const apiRequest = async (
@@ -53,6 +75,7 @@ export const apiRequest = async (
   options: RequestInit & { timeout?: number; retryOn401?: boolean } = {},
 ): Promise<any> => {
   const { timeout = 10000, retryOn401 = true, ...fetchOptions } = options;
+  const targetUrl = buildApiUrl(url);
   
   const headers = await getAuthHeaders();
   const mergedOptions = {
@@ -70,7 +93,7 @@ export const apiRequest = async (
   mergedOptions.signal = signal;
 
   try {
-    let response = await fetch(url, mergedOptions);
+    let response = await fetch(targetUrl, mergedOptions);
     if (id) clearTimeout(id);
 
     // If request failed with 401 and retryOn401 is enabled, attempt one force-refresh of Firebase ID token
@@ -84,7 +107,7 @@ export const apiRequest = async (
             ...(fetchOptions.headers || {}),
           },
         };
-        const retryResponse = await fetch(url, retryOptions);
+        const retryResponse = await fetch(targetUrl, retryOptions);
         if (retryResponse.ok) {
           response = retryResponse;
         }

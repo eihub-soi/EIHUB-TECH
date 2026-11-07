@@ -1,4 +1,4 @@
-import { getAuthHeaders, apiRequest } from "../utils/api";
+import { getAuthHeaders, apiRequest, buildApiUrl } from "../utils/api";
 
 export interface EmailPayload {
   report_type: string;
@@ -27,7 +27,7 @@ export const previewReport = async (reportType: string, filters?: any): Promise<
     });
   }
 
-  const response = await fetch(`/api/admin/reports/preview-pdf?${query.toString()}`, {
+  const response = await fetch(buildApiUrl(`/api/admin/reports/preview-pdf?${query.toString()}`), {
     method: "GET",
     headers,
   });
@@ -61,7 +61,7 @@ export const downloadReportCsv = async (reportType: string, filters?: any): Prom
       if (value) query.append(key, String(value));
     });
   }
-  const response = await fetch(`/api/admin/reports/download-csv?${query.toString()}`, {
+  const response = await fetch(buildApiUrl(`/api/admin/reports/download-csv?${query.toString()}`), {
     method: "GET",
     headers,
   });
@@ -85,7 +85,7 @@ export const downloadReportSql = async (reportType: string, filters?: any): Prom
       if (value) query.append(key, String(value));
     });
   }
-  const response = await fetch(`/api/admin/reports/download-sql?${query.toString()}`, {
+  const response = await fetch(buildApiUrl(`/api/admin/reports/download-sql?${query.toString()}`), {
     method: "GET",
     headers,
   });

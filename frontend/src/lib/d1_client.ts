@@ -1,6 +1,6 @@
 // D1 HTTP API Client (Replaces D1 client)
 // This proxy forwards all queries to the FastAPI backend at /api/query
-import { getAuthHeaders } from "../utils/api";
+import { getAuthHeaders, buildApiUrl } from "../utils/api";
 
 export const isD1Configured = true;
 
@@ -131,7 +131,7 @@ class D1QueryBuilder {
 
   private async fetchQuery(sql: string, args: any[]) {
     const authHeaders = await getAuthHeaders();
-    const response = await fetch("/api/query", {
+    const response = await fetch(buildApiUrl("/api/query"), {
       method: "POST",
       headers: {
         ...authHeaders,
@@ -431,7 +431,7 @@ export const d1 = {
 export const client = {
   async execute({ sql, args }: { sql: string; args?: any[] }) {
     const authHeaders = await getAuthHeaders();
-    const response = await fetch("/api/query", {
+    const response = await fetch(buildApiUrl("/api/query"), {
       method: "POST",
       headers: {
         ...authHeaders,

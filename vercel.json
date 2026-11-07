@@ -14,7 +14,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "/api/index.py"
+      "destination": "https://eihub-tech.onrender.com/api/:path*"
     },
     {
       "source": "/((?!api|assets|manifest.json|sw.js|logo.png|avatars|favicon.ico|robots.txt).*)",

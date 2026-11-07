@@ -5,7 +5,7 @@ import {
   Receipt, DollarSign, Loader2
 } from "lucide-react";
 import { toast } from "sonner";
-import { apiRequest } from "../../utils/api";
+import { apiRequest, buildApiUrl } from "../../utils/api";
 import { motion, AnimatePresence } from "framer-motion";
 import { useEscapeKey } from "../../hooks/useEscapeKey";
 import { useAuth } from "../../contexts/AuthContext";
@@ -70,7 +70,7 @@ export const ImportBillModal: React.FC<ImportBillModalProps> = ({ isOpen, onClos
     try {
       const token = localStorage.getItem("ei_hub_auth_token") || "";
       
-      const res = await fetch("/api/purchases/import/preview", {
+      const res = await fetch(buildApiUrl("/api/purchases/import/preview"), {
         method: "POST",
         headers: {
           "Authorization": `Bearer ${token}`

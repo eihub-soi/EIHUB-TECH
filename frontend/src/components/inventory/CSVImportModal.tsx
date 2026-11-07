@@ -1,7 +1,7 @@
 import React, { useState, useRef } from "react";
 import { UploadCloud, FileText, CheckCircle2, AlertCircle, X, Download, Loader2, ArrowRight } from "lucide-react";
 import { toast } from "sonner";
-import { getAuthHeaders } from "../../utils/api";
+import { getAuthHeaders, buildApiUrl } from "../../utils/api";
 import { useEscapeKey } from "../../hooks/useEscapeKey";
 
 interface CSVImportModalProps {
@@ -24,7 +24,7 @@ export const CSVImportModal: React.FC<CSVImportModalProps> = ({ onClose, onSucce
 
   const downloadTemplate = async () => {
     const headers = await getAuthHeaders();
-    fetch("/api/admin/components/import/template", {
+    fetch(buildApiUrl("/api/admin/components/import/template"), {
       headers
     })
     .then(res => res.blob())
@@ -71,7 +71,7 @@ export const CSVImportModal: React.FC<CSVImportModalProps> = ({ onClose, onSucce
     try {
       const headers = await getAuthHeaders();
       delete headers["Content-Type"]; // Let browser set multipart/form-data with boundary
-      const response = await fetch("/api/admin/components/import/preview", {
+      const response = await fetch(buildApiUrl("/api/admin/components/import/preview"), {
         method: "POST",
         headers,
         body: formData
@@ -97,7 +97,7 @@ export const CSVImportModal: React.FC<CSVImportModalProps> = ({ onClose, onSucce
     
     try {
       const headers = await getAuthHeaders();
-      const response = await fetch("/api/admin/components/import/confirm", {
+      const response = await fetch(buildApiUrl("/api/admin/components/import/confirm"), {
         method: "POST",
         headers,
         body: JSON.stringify({ rows, mode: importMode })

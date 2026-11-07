@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { mockEngine } from "../../services/mockEngine";
 import { useAuth } from "../../contexts/AuthContext";
 import { formatDateOnly, parseUTCDate } from "../../utils/timestamp";
@@ -23,6 +24,7 @@ import {
 
 export const PurchaseOrders: React.FC = () => {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [purchases, setPurchases] = useState<PurchaseOrder[]>(
     mockEngine.getPurchases(),
   );
@@ -191,6 +193,12 @@ export const PurchaseOrders: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-3">
+          <button
+            onClick={() => navigate(user?.role === 'admin' ? '/admin/imports?tab=ocr' : '/faculty/imports?tab=ocr')}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs transition-all hover:scale-105 shadow-xs"
+          >
+            <FileText className="w-4 h-4" /> Import Bill (OCR)
+          </button>
           <button
             onClick={() => setShowCreateModal(true)}
             className="flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-[#60A5FA] hover:bg-[#60A5FA] text-white font-bold text-xs transition-all hover:scale-105"

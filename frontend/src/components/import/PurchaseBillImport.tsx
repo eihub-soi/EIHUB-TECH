@@ -1,7 +1,13 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { 
   Upload, 
   FileText, 
+  Camera,
+  ZoomIn, 
+  ZoomOut, 
+  RotateCw, 
+  RotateCcw, 
+  Maximize2,
   AlertCircle, 
   CheckCircle2, 
   Loader2, 
@@ -9,16 +15,27 @@ import {
   Plus, 
   Trash2, 
   ChevronRight, 
+  ChevronLeft,
   Check, 
   AlertTriangle, 
   ArrowRight,
+  ArrowLeft,
   Database,
   RefreshCw,
   Eye,
   Info,
-  DollarSign
+  DollarSign,
+  Building2,
+  Calendar,
+  Hash,
+  Search,
+  Sparkles,
+  ShieldCheck,
+  ShieldAlert,
+  Percent,
+  CheckCheck
 } from 'lucide-react';
-import { apiRequest, getAuthHeaders } from '../../utils/api';
+import { apiRequest, getAuthHeaders, buildApiUrl } from '../../utils/api';
 import { useAuth } from '../../contexts/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -26,27 +43,59 @@ import { toast } from 'sonner';
 interface InvoiceMetadata {
   supplier_name: string;
   supplier_gst: string;
+  supplier_phone?: string;
+  supplier_address?: string;
   invoice_number: string;
   invoice_date: string;
-  grand_total: number;
-  subtotal: number;
-  discount: number;
-  gst_tax: number;
+  due_date: string;
   po_number: string;
+  subtotal: number;
+  taxable_amount: number;
+  cgst: number;
+  sgst: number;
+  igst: number;
+  gst_tax: number;
+  discount: number;
+  round_off: number;
+  grand_total: number;
+  calculated_total?: number;
+  confidence?: Record<string, number>;
+  uncertain_fields?: string[];
+  is_duplicate?: boolean;
+  duplicate_info?: {
+    invoice_number: string;
+    supplier_name: string;
+    existing_id?: string;
+    created_at?: string;
+  } | null;
+  supplier_match?: {
+    id: string;
+    name: string;
+    gstin: string;
+    phone?: string;
+    address?: string;
+    is_existing: boolean;
+  } | null;
 }
 
 interface ComponentRow {
   id: string;
   item_name: string;
+  hsn_code: string;
   part_number: string;
   category: string;
   description: string;
-  features: string;
+  features?: string;
   quantity: number;
   unit: string;
   unit_price: number;
+  discount: number;
+  tax_rate: number;
+  cgst_amount?: number;
+  sgst_amount?: number;
+  igst_amount?: number;
   total: number;
-  confidence: 'high' | 'warning' | 'error';
+  confidence_score: number;
   errors: string[];
   warnings: string[];
   status: string;
@@ -60,6 +109,7 @@ interface ComponentRow {
     id: string;
     name: string;
     similarity: number;
+    stock?: number;
   } | null;
   accepted_as_new?: boolean;
 }
@@ -68,43 +118,79 @@ export const PurchaseBillImport: React.FC = () => {
   const { user } = useAuth();
   const navigate = useNavigate();
 
-  if (user?.role === 'faculty' || user?.role === 'admin') {
+  // Role validation: Admin & Super Admin are primary; Student is denied
+  if (user && user.role === 'student') {
     return (
-      <div className="p-8 text-center bg-white rounded-3xl border border-gray-200 m-6">
-        <h2 className="text-xl font-bold text-red-600">Access Denied</h2>
-        <p className="text-gray-500 mt-2">The Purchase Bills feature has been disabled for Faculty and Admin.</p>
+      <div className="p-8 text-center bg-white rounded-3xl border border-gray-200 m-6 max-w-xl mx-auto shadow-sm">
+        <ShieldAlert className="w-12 h-12 text-red-500 mx-auto mb-3" />
+        <h2 className="text-xl font-bold text-gray-900">Access Restricted</h2>
+        <p className="text-gray-500 mt-2 text-sm">
+          The Smart Purchase Bill Automation module is restricted to administrators and procurement staff.
+        </p>
       </div>
     );
   }
 
-  // Step 1: Upload, Step 2: Processing, Step 3: Editor & Verification, Step 4: Summary, Step 5: Success
-  const [step, setStep] = useState(1);
+  // Workflow Steps:
+  // 1: Upload / Photograph
+  // 2: Intelligent Extraction (Processing)
+  // 3: Side-by-Side Verification & Matching
+  // 4: Confirmation Checklist Modal / Review
+  // 5: Success & Purchase Register Committal
+  const [step, setStep] = useState<number>(1);
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [fileType, setFileType] = useState<'pdf' | 'image' | null>(null);
+  const [fileSizeStr, setFileSizeStr] = useState<string>('');
 
-  // Editable invoice and component lists
+  // Processing Progress simulation
+  const [extractionProgress, setExtractionProgress] = useState<number>(15);
+  const [extractionStage, setExtractionStage] = useState<string>('Validating document...');
+
+  // Viewer Controls for Left Preview Panel
+  const [zoomLevel, setZoomLevel] = useState<number>(100);
+  const [rotation, setRotation] = useState<number>(0);
+  const [currentPage, setCurrentPage] = useState<number>(1);
+  const [totalPages, setTotalPages] = useState<number>(1);
+
+  // Search filter for 40+ line items in right panel
+  const [itemSearchQuery, setItemSearchQuery] = useState<string>('');
+
+  // Extracted Metadata
   const [metadata, setMetadata] = useState<InvoiceMetadata>({
     supplier_name: '',
     supplier_gst: '',
+    supplier_phone: '',
+    supplier_address: '',
     invoice_number: '',
     invoice_date: '',
-    grand_total: 0,
+    due_date: '',
+    po_number: '',
     subtotal: 0,
-    discount: 0,
+    taxable_amount: 0,
+    cgst: 0,
+    sgst: 0,
+    igst: 0,
     gst_tax: 0,
-    po_number: ''
+    discount: 0,
+    round_off: 0,
+    grand_total: 0,
+    confidence: {},
+    uncertain_fields: [],
+    is_duplicate: false
   });
-  
+
   const [lineItems, setLineItems] = useState<ComponentRow[]>([]);
   const [excludedItems, setExcludedItems] = useState<ComponentRow[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
   
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [isConfirming, setIsConfirming] = useState(false);
-  const [acknowledgeMismatch, setAcknowledgeMismatch] = useState(false);
+  const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const [isVerifying, setIsVerifying] = useState<boolean>(false);
+  const [isConfirming, setIsConfirming] = useState<boolean>(false);
+  const [acknowledgeMismatch, setAcknowledgeMismatch] = useState<boolean>(false);
+  const [allowDuplicateCommit, setAllowDuplicateCommit] = useState<boolean>(false);
 
-  // Checklist for final confirmation step
+  // Confirmation Checklist
   const [checklist, setChecklist] = useState({
     details: false,
     components: false,
@@ -115,37 +201,63 @@ export const PurchaseBillImport: React.FC = () => {
   const [importSummary, setImportSummary] = useState<any>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
 
-  const handleVerifyAfterEdit = (index: number, updatedItem: ComponentRow) => {
-    const updated = [...lineItems];
-    updated[index] = updatedItem;
-    setLineItems(updated);
-    setTimeout(handleVerify, 100);
+  // File size formatter
+  const formatFileSize = (bytes: number): string => {
+    if (bytes < 1024) return bytes + ' B';
+    else if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+    else return (bytes / 1048576).toFixed(2) + ' MB';
   };
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-      const selectedFile = e.target.files[0];
-      const ext = selectedFile.name.split('.').pop()?.toLowerCase();
-      if (!ext || !['pdf', 'png', 'jpg', 'jpeg'].includes(ext)) {
-        toast.error("Unsupported file format. Please upload a PDF, PNG, or JPG image.");
-        return;
-      }
-      if (selectedFile.size > 20 * 1024 * 1024) {
-        toast.error("File exceeds the 20MB size limit.");
-        return;
-      }
+  const handleSelectFile = async (selectedFile: File) => {
+    const ext = selectedFile.name.split('.').pop()?.toLowerCase();
+    if (!ext || !['pdf', 'png', 'jpg', 'jpeg'].includes(ext)) {
+      toast.error('Unsupported file format. Please upload a PDF, PNG, JPG, or JPEG file.');
+      return;
+    }
+    if (selectedFile.size > 20 * 1024 * 1024) {
+      toast.error('File size exceeds the 20MB limit.');
+      return;
+    }
 
-      setFile(selectedFile);
-      setFileType(ext === 'pdf' ? 'pdf' : 'image');
-      setPreviewUrl(URL.createObjectURL(selectedFile));
-      setStep(2);
-      await processOCR(selectedFile);
+    setFile(selectedFile);
+    setFileSizeStr(formatFileSize(selectedFile.size));
+    const isPdfDoc = ext === 'pdf';
+    setFileType(isPdfDoc ? 'pdf' : 'image');
+    setPreviewUrl(URL.createObjectURL(selectedFile));
+    setZoomLevel(100);
+    setRotation(0);
+    setStep(2);
+    await processOCR(selectedFile);
+  };
+
+  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      handleSelectFile(e.target.files[0]);
     }
   };
 
   const processOCR = async (selectedFile: File) => {
     setIsProcessing(true);
+    setExtractionProgress(20);
+    setExtractionStage('Preprocessing document and sharpening image...');
+
+    const stageTimer1 = setTimeout(() => {
+      setExtractionProgress(45);
+      setExtractionStage('Optical Character Recognition (OCR) running...');
+    }, 400);
+
+    const stageTimer2 = setTimeout(() => {
+      setExtractionProgress(70);
+      setExtractionStage('Extracting line items, HSN codes, and GST breakdown...');
+    }, 900);
+
+    const stageTimer3 = setTimeout(() => {
+      setExtractionProgress(90);
+      setExtractionStage('Matching items against EI HUB inventory master...');
+    }, 1400);
+
     try {
       const formData = new FormData();
       formData.append('file', selectedFile);
@@ -153,43 +265,73 @@ export const PurchaseBillImport: React.FC = () => {
       const headers = await getAuthHeaders();
       delete headers['Content-Type'];
 
-      const response = await fetch(`/api/imports/purchase/ocr`, {
+      const response = await fetch(buildApiUrl('/api/imports/purchase/ocr'), {
         method: 'POST',
         headers,
         body: formData
       });
 
+      clearTimeout(stageTimer1);
+      clearTimeout(stageTimer2);
+      clearTimeout(stageTimer3);
+
       if (!response.ok) {
-        const err = await response.text();
-        throw new Error(err || 'OCR Failed');
+        const errText = await response.text();
+        throw new Error(errText || 'OCR processing failed');
       }
 
       const result = await response.json();
-      
+      setExtractionProgress(100);
+      setExtractionStage('Extraction complete!');
+
+      const meta = result.metadata || {};
       setMetadata({
-        supplier_name: result.metadata.supplier_name || '',
-        supplier_gst: result.metadata.supplier_gst || '',
-        invoice_number: result.metadata.invoice_number || '',
-        invoice_date: result.metadata.invoice_date || '',
-        grand_total: result.metadata.grand_total || 0,
-        subtotal: result.metadata.subtotal || 0,
-        discount: result.metadata.discount || 0,
-        gst_tax: result.metadata.gst_tax || 0,
-        po_number: result.metadata.po_number || ''
+        supplier_name: meta.supplier_name || '',
+        supplier_gst: meta.supplier_gst || '',
+        supplier_phone: meta.supplier_match?.phone || '',
+        supplier_address: meta.supplier_match?.address || '',
+        invoice_number: meta.invoice_number || '',
+        invoice_date: meta.invoice_date || '',
+        due_date: meta.due_date || '',
+        po_number: meta.po_number || '',
+        subtotal: meta.subtotal || 0,
+        taxable_amount: meta.taxable_amount || meta.subtotal || 0,
+        cgst: meta.cgst || 0,
+        sgst: meta.sgst || 0,
+        igst: meta.igst || 0,
+        gst_tax: meta.gst_tax || 0,
+        discount: meta.discount || 0,
+        round_off: meta.round_off || 0,
+        grand_total: meta.grand_total || 0,
+        calculated_total: meta.calculated_total || 0,
+        confidence: meta.confidence || {},
+        uncertain_fields: meta.uncertain_fields || [],
+        is_duplicate: !!meta.is_duplicate,
+        duplicate_info: meta.duplicate_info || null,
+        supplier_match: meta.supplier_match || null
       });
 
-      // Mark all parsed line items selected by default
-      const parsedItems = (result.line_items || []).map((item: any) => ({
+      const parsedItems = (result.line_items || []).map((item: any, idx: number) => ({
         ...item,
+        id: item.id || `row-${idx}-${Date.now()}`,
+        unit: item.unit || 'pcs',
+        hsn_code: item.hsn_code || '',
+        discount: item.discount || 0,
+        tax_rate: item.tax_rate || 18,
         selected: true
       }));
 
       setLineItems(parsedItems);
       setExcludedItems(result.excluded_items || []);
       setWarnings(result.warnings || []);
-      setStep(3); // Go to editor
+      
+      // Delay transition slightly for smooth visual progression
+      setTimeout(() => {
+        setStep(3); // Enter side-by-side verification
+      }, 300);
+
     } catch (err: any) {
-      toast.error(`OCR Processing Error: ${err.message}`);
+      toast.error(`OCR Extraction Error: ${err.message}`);
       setStep(1);
       setFile(null);
     } finally {
@@ -200,7 +342,7 @@ export const PurchaseBillImport: React.FC = () => {
   const handleMetadataChange = (field: keyof InvoiceMetadata, val: any) => {
     setMetadata(prev => ({
       ...prev,
-      [field]: field === 'grand_total' || field === 'subtotal' || field === 'gst_tax' || field === 'discount'
+      [field]: ['grand_total', 'subtotal', 'taxable_amount', 'cgst', 'sgst', 'igst', 'gst_tax', 'discount', 'round_off'].includes(field)
         ? parseFloat(val) || 0
         : val
     }));
@@ -209,18 +351,21 @@ export const PurchaseBillImport: React.FC = () => {
   const handleCellEdit = (index: number, field: keyof ComponentRow, value: any) => {
     const updated = [...lineItems];
     const row = { ...updated[index] };
-    
+
     if (field === 'quantity') {
       row.quantity = parseInt(value) || 0;
-      row.total = row.quantity * row.unit_price;
+      row.total = row.quantity * row.unit_price * (1 - (row.discount || 0) / 100);
+      row.new_stock = (row.old_stock || 0) + row.quantity;
     } else if (field === 'unit_price') {
       row.unit_price = parseFloat(value) || 0;
-      row.total = row.quantity * row.unit_price;
+      row.total = row.quantity * row.unit_price * (1 - (row.discount || 0) / 100);
+    } else if (field === 'discount') {
+      row.discount = parseFloat(value) || 0;
+      row.total = row.quantity * row.unit_price * (1 - (row.discount || 0) / 100);
     } else {
       (row as any)[field] = value;
     }
-    
-    row.new_stock = row.old_stock + row.quantity;
+
     updated[index] = row;
     setLineItems(updated);
   };
@@ -229,18 +374,20 @@ export const PurchaseBillImport: React.FC = () => {
     const newItem: ComponentRow = {
       id: `manual-item-${Date.now()}`,
       item_name: '',
+      hsn_code: '',
       part_number: '',
       category: 'Electronics',
-      description: 'Imported via Purchase Bill OCR',
-      features: '',
+      description: 'Manually added purchase bill item',
       quantity: 1,
       unit: 'pcs',
       unit_price: 0,
+      discount: 0,
+      tax_rate: 18,
       total: 0,
-      confidence: 'high',
+      confidence_score: 100,
       errors: [],
       warnings: [],
-      status: 'NEW',
+      status: '✓ VERIFIED NEW',
       is_new: true,
       is_existing: false,
       existing_id: null,
@@ -248,13 +395,14 @@ export const PurchaseBillImport: React.FC = () => {
       new_stock: 1,
       selected: true
     };
-    setLineItems(prev => [...prev, newItem]);
+    setLineItems(prev => [newItem, ...prev]);
   };
 
   const deleteRow = (index: number) => {
     const item = lineItems[index];
     setExcludedItems(prev => [...prev, { ...item, selected: false }]);
     setLineItems(prev => prev.filter((_, idx) => idx !== index));
+    toast.info(`Moved "${item.item_name || 'Item'}" to excluded lines.`);
   };
 
   const restoreExcludedItem = (index: number) => {
@@ -264,6 +412,7 @@ export const PurchaseBillImport: React.FC = () => {
   };
 
   const handleVerify = async () => {
+    setIsVerifying(true);
     try {
       const response = await apiRequest(`/api/imports/purchase/verify`, {
         method: 'POST',
@@ -272,10 +421,12 @@ export const PurchaseBillImport: React.FC = () => {
           line_items: lineItems
         })
       });
-      setLineItems(response.line_items);
-      toast.success("Verification check complete!");
+      setLineItems(response.line_items || lineItems);
+      toast.success("Verification complete: Inventory master and stock levels re-checked!");
     } catch (error: any) {
       toast.error(`Verification Failed: ${error.message}`);
+    } finally {
+      setIsVerifying(false);
     }
   };
 
@@ -287,6 +438,7 @@ export const PurchaseBillImport: React.FC = () => {
         body: JSON.stringify({
           metadata: {
             ...metadata,
+            allow_duplicate: allowDuplicateCommit,
             duplicates_merged: lineItems.filter(r => r.warnings.some(w => w.includes("Merged"))).length
           },
           line_items: lineItems.filter(r => r.selected)
@@ -294,31 +446,60 @@ export const PurchaseBillImport: React.FC = () => {
       });
 
       setImportSummary(response.metrics);
-      setStep(5); // Success step
-      toast.success("Purchase bill stock committed safely!");
+      setStep(5);
+      toast.success("Purchase bill committed successfully! Inventory stocks and register updated.");
     } catch (error: any) {
       toast.error(`Commit Failed: ${error.message}`);
-      setStep(3);
     } finally {
       setIsConfirming(false);
     }
   };
 
+  // Cleanup temporary document object URLs to ensure zero permanent storage/memory leak
+  useEffect(() => {
+    return () => {
+      if (previewUrl) {
+        try {
+          URL.revokeObjectURL(previewUrl);
+        } catch {}
+      }
+    };
+  }, [previewUrl]);
+
   const resetWizard = () => {
+    if (previewUrl) {
+      try {
+        URL.revokeObjectURL(previewUrl);
+      } catch {}
+    }
     setStep(1);
     setFile(null);
     setPreviewUrl(null);
     setFileType(null);
+    setFileSizeStr('');
+    setZoomLevel(100);
+    setRotation(0);
     setMetadata({
       supplier_name: '',
       supplier_gst: '',
+      supplier_phone: '',
+      supplier_address: '',
       invoice_number: '',
       invoice_date: '',
-      grand_total: 0,
+      due_date: '',
+      po_number: '',
       subtotal: 0,
-      discount: 0,
+      taxable_amount: 0,
+      cgst: 0,
+      sgst: 0,
+      igst: 0,
       gst_tax: 0,
-      po_number: ''
+      discount: 0,
+      round_off: 0,
+      grand_total: 0,
+      confidence: {},
+      uncertain_fields: [],
+      is_duplicate: false
     });
     setLineItems([]);
     setExcludedItems([]);
@@ -329,125 +510,211 @@ export const PurchaseBillImport: React.FC = () => {
       stock: false,
       total: false
     });
+    setAcknowledgeMismatch(false);
+    setAllowDuplicateCommit(false);
   };
 
-  const renderStepper = () => {
-    const steps = [
-      { name: "Upload bill", num: 1 },
-      { name: "OCR Processing", num: 2 },
-      { name: "Verify & Edit", num: 3 },
-      { name: "Confirm Summary", num: 4 },
-      { name: "Success", num: 5 }
-    ];
-    return (
-      <div className="flex items-center justify-between mb-8 bg-white p-5 rounded-3xl border border-gray-100 shadow-sm overflow-x-auto">
-        {steps.map((s, i) => (
-          <div key={s.name} className="flex items-center flex-shrink-0">
-            <div className={`flex items-center justify-center w-8 h-8 rounded-full border-2 font-bold text-sm transition-all duration-300 ${
-              step > s.num ? 'bg-green-500 border-green-500 text-white' : 
-              step === s.num ? 'bg-blue-600 border-blue-600 text-white shadow-md shadow-blue-200 scale-105' : 
-              'border-gray-200 text-gray-400 bg-white'
-            }`}>
-              {step > s.num ? <Check className="w-4 h-4" /> : i + 1}
-            </div>
-            <span className={`ml-2 text-xs sm:text-sm font-semibold transition-all duration-300 ${
-              step >= s.num ? 'text-gray-900' : 'text-gray-400'
-            }`}>{s.name}</span>
-            {i < steps.length - 1 && <ChevronRight className="w-4 h-4 mx-3 sm:mx-4 text-gray-300" />}
-          </div>
-        ))}
-      </div>
-    );
-  };
+  // Reconciled financial calculations
+  const totalComponentsCost = useMemo(() => {
+    return lineItems.reduce((acc, r) => acc + (r.selected ? r.total : 0), 0);
+  }, [lineItems]);
 
-  // Validation calculations
-  const totalComponentsCost = lineItems.reduce((acc, r) => acc + (r.selected ? r.total : 0), 0);
-  const totalCharges = excludedItems.reduce((acc, r) => acc + r.total, 0);
-  const calculatedTotal = totalComponentsCost + totalCharges + metadata.gst_tax - metadata.discount;
-  const totalMismatch = Math.abs(calculatedTotal - metadata.grand_total) > 5;
+  const totalCharges = useMemo(() => {
+    return excludedItems.reduce((acc, r) => acc + r.total, 0);
+  }, [excludedItems]);
 
-  const getCriticalErrorsList = () => {
+  const totalTaxCalculated = (metadata.cgst || 0) + (metadata.sgst || 0) + (metadata.igst || 0) || metadata.gst_tax || 0;
+  const calculatedGrandTotal = totalComponentsCost + totalCharges + totalTaxCalculated - (metadata.discount || 0) + (metadata.round_off || 0);
+  const totalMismatch = Math.abs(calculatedGrandTotal - metadata.grand_total) > 2.0;
+
+  // Validation checks
+  const getCriticalErrorsList = (): string[] => {
     const errs: string[] = [];
-    const selectedItems = lineItems.filter(r => r.selected);
-    
-    if (selectedItems.length === 0) {
-      errs.push("At least one component must be selected.");
+    const selected = lineItems.filter(r => r.selected);
+
+    if (selected.length === 0) {
+      errs.push("At least one line item must be selected.");
     }
-    
-    selectedItems.forEach((r, idx) => {
+
+    if (!metadata.invoice_number.trim()) {
+      errs.push("Invoice Number is required.");
+    }
+
+    selected.forEach((r, idx) => {
       const rowNum = idx + 1;
       if (!r.item_name || !r.item_name.trim()) {
         errs.push(`Row #${rowNum}: Component name is required.`);
       }
       if (r.quantity <= 0) {
-        errs.push(`Row #${rowNum} (${r.item_name || 'Unnamed'}): Quantity must be greater than zero.`);
+        errs.push(`Row #${rowNum} (${r.item_name || 'Item'}): Quantity must be > 0.`);
       }
       if (r.unit_price < 0) {
-        errs.push(`Row #${rowNum} (${r.item_name || 'Unnamed'}): Unit price cannot be negative.`);
+        errs.push(`Row #${rowNum} (${r.item_name || 'Item'}): Unit price cannot be negative.`);
       }
-      if (!r.category || r.category === 'Select Category') {
-        errs.push(`Row #${rowNum} (${r.item_name || 'Unnamed'}): Required category selection.`);
-      }
-      if (r.status && r.status.includes('POSSIBLE MATCH')) {
-        errs.push(`Row #${rowNum} (${r.item_name || 'Unnamed'}): Unresolved possible database match.`);
-      }
-      if (r.errors && r.errors.length > 0) {
-        errs.push(`Row #${rowNum} (${r.item_name || 'Unnamed'}): ${r.errors.join(", ")}`);
+      if (r.status && r.status.includes('POSSIBLE MATCH') && !r.accepted_as_new) {
+        errs.push(`Row #${rowNum} (${r.item_name || 'Item'}): Unresolved possible inventory match.`);
       }
     });
-    
+
     return errs;
   };
-  
+
   const criticalErrors = getCriticalErrorsList();
   const hasCriticalErrors = criticalErrors.length > 0;
 
+  // Filtered line items for search
+  const filteredLineItems = useMemo(() => {
+    if (!itemSearchQuery.trim()) return lineItems;
+    const q = itemSearchQuery.toLowerCase();
+    return lineItems.filter(item => 
+      item.item_name.toLowerCase().includes(q) ||
+      (item.hsn_code && item.hsn_code.toLowerCase().includes(q)) ||
+      (item.category && item.category.toLowerCase().includes(q))
+    );
+  }, [lineItems, itemSearchQuery]);
+
+  // GSTIN format checker
+  const isValidGSTIN = (gst: string): boolean => {
+    return /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/.test(gst.trim());
+  };
+
   return (
-    <div className="p-4 sm:p-8 max-w-7xl mx-auto space-y-6">
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+    <div className="p-4 sm:p-6 lg:p-8 max-w-[1600px] mx-auto space-y-6">
+      {/* Top Header Section */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-gray-100 pb-5">
         <div>
-          <h1 className="text-2xl sm:text-3xl font-extrabold text-gray-900 tracking-tight flex items-center gap-2">
-            <DollarSign className="w-7 h-7 text-green-600" />
-            OCR Scanned Purchase Bill Ingestion
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-sky-50 border border-sky-200 text-sky-700 text-xs font-bold tracking-wide mb-2 shadow-xs">
+            <Sparkles className="w-3.5 h-3.5 text-sky-600 animate-pulse" />
+            Smart Bill Automation &middot; Optical Character Recognition
+          </div>
+          <h1 className="text-2xl sm:text-3xl font-extrabold text-gray-900 tracking-tight flex items-center gap-2.5">
+            Import Purchase Bills from PDF &amp; JPG
           </h1>
-          <p className="text-xs sm:text-sm text-gray-500 mt-1">
-            Scan scanned invoices or PDF files. Automatic tabular layout extraction, metadata rules, duplicate combining, and component mapping.
+          <p className="text-xs sm:text-sm text-gray-500 mt-1 max-w-3xl leading-relaxed">
+            Eliminate manual purchase invoice data entry. Upload supplier PDF bills or capture invoice photographs to automatically extract invoice headers, line items, and GST taxes, match items against existing inventory, and commit verified records into the register.
           </p>
         </div>
+
+        {step === 3 && (
+          <div className="flex items-center gap-2 self-start md:self-auto">
+            <button
+              onClick={resetWizard}
+              className="px-4 py-2 border border-gray-200 hover:bg-gray-50 text-gray-700 font-bold text-xs rounded-xl shadow-xs transition-all"
+            >
+              Upload Another
+            </button>
+            <button
+              onClick={() => setStep(4)}
+              disabled={hasCriticalErrors || lineItems.filter(r => r.selected).length === 0}
+              className="px-5 py-2 bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-sm transition-all flex items-center gap-1.5"
+            >
+              Review &amp; Confirm
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
       </div>
 
-      {renderStepper()}
+      {/* Stepper Progress Header */}
+      <div className="flex items-center justify-between bg-white p-4 sm:p-5 rounded-2xl border border-gray-200/80 shadow-xs overflow-x-auto gap-2">
+        {[
+          { name: "Upload Bill", num: 1 },
+          { name: "Intelligent Extraction", num: 2 },
+          { name: "Side-by-Side Verification", num: 3 },
+          { name: "Confirmation", num: 4 },
+          { name: "Purchase Register", num: 5 }
+        ].map((s, idx) => (
+          <div key={s.name} className="flex items-center shrink-0">
+            <div className={`flex items-center justify-center w-7 h-7 sm:w-8 sm:h-8 rounded-full border-2 font-bold text-xs sm:text-sm transition-all duration-300 ${
+              step > s.num ? 'bg-emerald-600 border-emerald-600 text-white' : 
+              step === s.num ? 'bg-sky-600 border-sky-600 text-white shadow-sm ring-4 ring-sky-100 scale-105' : 
+              'border-gray-200 text-gray-400 bg-gray-50'
+            }`}>
+              {step > s.num ? <Check className="w-4 h-4" /> : s.num}
+            </div>
+            <span className={`ml-2 text-xs sm:text-sm font-semibold whitespace-nowrap ${
+              step >= s.num ? 'text-gray-900 font-bold' : 'text-gray-400'
+            }`}>
+              {s.name}
+            </span>
+            {idx < 4 && <ChevronRight className="w-4 h-4 mx-2 sm:mx-3 text-gray-300" />}
+          </div>
+        ))}
+      </div>
 
-      {/* STEP 1: Upload */}
+      {/* ========================================================================= */}
+      {/* STEP 1: Upload or Photograph Interface */}
+      {/* ========================================================================= */}
       {step === 1 && (
-        <div className="max-w-3xl mx-auto space-y-6">
-          <div className="bg-blue-50 border border-blue-100 rounded-3xl p-5 flex items-start gap-4">
-            <Info className="w-5 h-5 text-blue-600 mt-0.5 flex-shrink-0" />
-            <div>
-              <h4 className="font-bold text-blue-900 text-sm sm:text-base">Document Scanning Engine</h4>
-              <p className="text-xs sm:text-sm text-blue-700 mt-1">
-                Upload scanned images (PNG, JPG, JPEG) or PDF documents. The PIL enhancement pipeline improves readability and sharpening before running Tesseract OCR.
-              </p>
+        <div className="max-w-4xl mx-auto space-y-6">
+          {/* Two Prominent Upload Cards as specified in UI Reference */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Card 1: Supplier PDF Bills */}
+            <div 
+              onClick={() => {
+                if (fileInputRef.current) {
+                  fileInputRef.current.accept = ".pdf";
+                  fileInputRef.current.click();
+                }
+              }}
+              className="group cursor-pointer bg-white rounded-3xl p-6 border-2 border-gray-200 hover:border-sky-500 hover:shadow-md transition-all duration-300 flex flex-col justify-between"
+            >
+              <div>
+                <div className="w-12 h-12 rounded-2xl bg-sky-50 text-sky-600 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
+                  <FileText className="w-6 h-6" />
+                </div>
+                <h3 className="text-lg font-extrabold text-gray-900 group-hover:text-sky-600 transition-colors">
+                  Supplier PDF Bills
+                </h3>
+                <p className="text-xs text-gray-500 mt-1 leading-relaxed">
+                  Direct text parsing &amp; OCR for digitally generated supplier invoices or scanned multi-page PDF documents.
+                </p>
+              </div>
+              <div className="mt-5 pt-4 border-t border-gray-100 flex items-center justify-between">
+                <span className="text-xs font-bold text-sky-600 flex items-center gap-1">
+                  Upload PDF <ArrowRight className="w-3.5 h-3.5" />
+                </span>
+                <span className="text-[11px] font-semibold text-gray-400">PDF &middot; Up to 20MB</span>
+              </div>
+            </div>
+
+            {/* Card 2: Camera Photo (JPG/PNG) */}
+            <div 
+              onClick={() => {
+                if (cameraInputRef.current) {
+                  cameraInputRef.current.click();
+                }
+              }}
+              className="group cursor-pointer bg-white rounded-3xl p-6 border-2 border-gray-200 hover:border-sky-500 hover:shadow-md transition-all duration-300 flex flex-col justify-between"
+            >
+              <div>
+                <div className="w-12 h-12 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center mb-4 group-hover:scale-110 transition-transform">
+                  <Camera className="w-6 h-6" />
+                </div>
+                <h3 className="text-lg font-extrabold text-gray-900 group-hover:text-emerald-600 transition-colors">
+                  Camera Photo (JPG/PNG)
+                </h3>
+                <p className="text-xs text-gray-500 mt-1 leading-relaxed">
+                  Snap an invoice photograph with your mobile camera or upload clear printed receipts and scanned images.
+                </p>
+              </div>
+              <div className="mt-5 pt-4 border-t border-gray-100 flex items-center justify-between">
+                <span className="text-xs font-bold text-emerald-600 flex items-center gap-1">
+                  Take Photo / Browse <ArrowRight className="w-3.5 h-3.5" />
+                </span>
+                <span className="text-[11px] font-semibold text-gray-400">JPG, JPEG, PNG</span>
+              </div>
             </div>
           </div>
 
+          {/* Drag & Drop Upload Zone */}
           <div 
-            className="border-2 border-dashed border-gray-300 rounded-3xl p-16 text-center hover:bg-blue-50/30 hover:border-blue-500 transition-all duration-300 cursor-pointer bg-white shadow-sm flex flex-col items-center justify-center"
+            className="border-2 border-dashed border-sky-300 bg-sky-50/20 hover:bg-sky-50/40 rounded-3xl p-12 text-center transition-all duration-300 cursor-pointer flex flex-col items-center justify-center shadow-xs"
             onDragOver={(e) => e.preventDefault()}
             onDrop={async (e) => {
               e.preventDefault();
               if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-                const selectedFile = e.dataTransfer.files[0];
-                const ext = selectedFile.name.split('.').pop()?.toLowerCase();
-                if (ext && ['pdf', 'png', 'jpg', 'jpeg'].includes(ext)) {
-                  setFile(selectedFile);
-                  setFileType(ext === 'pdf' ? 'pdf' : 'image');
-                  setPreviewUrl(URL.createObjectURL(selectedFile));
-                  setStep(2);
-                  await processOCR(selectedFile);
-                } else {
-                  toast.error("Unsupported file format.");
-                }
+                handleSelectFile(e.dataTransfer.files[0]);
               }
             }}
             onClick={() => fileInputRef.current?.click()}
@@ -455,376 +722,716 @@ export const PurchaseBillImport: React.FC = () => {
             <input 
               type="file" 
               ref={fileInputRef} 
-              onChange={handleFileUpload} 
+              onChange={handleFileInputChange} 
               accept=".pdf, .png, .jpg, .jpeg" 
               className="hidden" 
             />
-            <div className="w-20 h-20 bg-blue-50 text-blue-600 rounded-full flex items-center justify-center mb-5 hover:scale-105 transition-all">
-              <Upload className="w-10 h-10" />
+            {/* Mobile Camera input with capture="environment" */}
+            <input 
+              type="file" 
+              ref={cameraInputRef} 
+              onChange={handleFileInputChange} 
+              accept="image/*" 
+              capture="environment" 
+              className="hidden" 
+            />
+
+            <div className="w-16 h-16 bg-sky-100 text-sky-600 rounded-full flex items-center justify-center mb-4 shadow-xs">
+              <Upload className="w-8 h-8" />
             </div>
-            <h3 className="text-lg sm:text-xl font-extrabold text-gray-900 mb-2">Drag and drop purchase bill here</h3>
-            <p className="text-xs sm:text-sm text-gray-500 mb-6">Supports PDF, PNG, JPG, JPEG (Max 20MB)</p>
-            <span className="px-6 py-3 border border-transparent text-sm font-bold rounded-2xl shadow-md text-white bg-blue-600 hover:bg-blue-700 hover:shadow-lg transition-all scale-100 hover:scale-105 active:scale-95">
-              Select Invoice File
-            </span>
+            <h3 className="text-lg font-extrabold text-gray-900 mb-1">
+              Drag &amp; drop purchase bill here, or browse
+            </h3>
+            <p className="text-xs text-gray-500 mb-5">
+              Supports PDF, PNG, JPG, JPEG documents (Max file size: 20MB)
+            </p>
+            <div className="flex flex-wrap items-center justify-center gap-3">
+              <button 
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  fileInputRef.current?.click();
+                }}
+                className="px-6 py-2.5 bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs rounded-xl shadow-sm transition-all hover:scale-105 active:scale-95"
+              >
+                Browse Files
+              </button>
+              <button 
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  cameraInputRef.current?.click();
+                }}
+                className="px-5 py-2.5 bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-bold text-xs rounded-xl shadow-xs transition-all flex items-center gap-2"
+              >
+                <Camera className="w-3.5 h-3.5 text-gray-500" />
+                Capture with Camera
+              </button>
+            </div>
+          </div>
+
+          {/* Supported Format Guidelines Card */}
+          <div className="bg-white rounded-2xl border border-gray-200 p-4 sm:p-5 flex items-start gap-4 shadow-xs">
+            <Info className="w-5 h-5 text-sky-600 shrink-0 mt-0.5" />
+            <div className="text-xs text-gray-600 space-y-1">
+              <h5 className="font-bold text-gray-900 text-sm">Best Practices for High OCR Accuracy:</h5>
+              <p>&bull; For paper invoices, ensure even lighting without glare, shadows, or folded edges.</p>
+              <p>&bull; Multi-page invoices are fully processed across all pages with automated table alignment.</p>
+              <p>&bull; Items in invoice will be automatically fuzzy-matched against your existing Components catalog.</p>
+            </div>
           </div>
         </div>
       )}
 
-      {/* STEP 2: OCR Processing Loader */}
+      {/* ========================================================================= */}
+      {/* STEP 2: Intelligent Extraction Progress Animation */}
+      {/* ========================================================================= */}
       {step === 2 && (
-        <div className="mt-16 flex flex-col items-center justify-center py-20 bg-white rounded-3xl shadow-sm border border-gray-100 max-w-2xl mx-auto">
-          <Loader2 className="w-14 h-14 text-blue-600 animate-spin mb-6" />
-          <h3 className="text-lg sm:text-xl font-extrabold text-gray-900">Running OCR Preprocessing...</h3>
-          <p className="text-xs sm:text-sm text-gray-500 mt-2 text-center px-6">
-            Grayscaling, enhancing contrast, resizing, and sharpening to extract clean text. Checking names in components catalog.
-          </p>
-        </div>
-      )}
-
-      {/* STEP 3: Preview, Edit & Table Grid */}
-      {step === 3 && (
-        <div className="flex flex-col lg:flex-row gap-6 overflow-hidden">
-          {/* Left panel: File preview */}
-          <div className="lg:w-1/3 bg-gray-100 rounded-3xl border border-gray-200 overflow-hidden min-h-[400px] flex flex-col">
-            <div className="bg-gray-50 px-5 py-3.5 border-b border-gray-200">
-              <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Source Bill Document</span>
-            </div>
-            <div className="flex-1 min-h-[450px]">
-              {fileType === 'pdf' && previewUrl ? (
-                <iframe src={previewUrl} className="w-full h-full border-0" title="PDF Preview" />
-              ) : previewUrl ? (
-                <div className="w-full h-full overflow-auto flex items-center justify-center p-4 bg-gray-50">
-                  <img src={previewUrl} alt="Scanned Invoice" className="max-w-full max-h-[500px] object-contain rounded-lg shadow-sm" />
-                </div>
-              ) : null}
+        <div className="max-w-2xl mx-auto py-16 px-6 bg-white rounded-3xl border border-gray-200 text-center shadow-xs space-y-6">
+          <div className="relative w-20 h-20 mx-auto">
+            <div className="w-20 h-20 rounded-full border-4 border-sky-100 border-t-sky-600 animate-spin flex items-center justify-center" />
+            <div className="absolute inset-0 flex items-center justify-center">
+              <Sparkles className="w-8 h-8 text-sky-600 animate-pulse" />
             </div>
           </div>
 
-          {/* Right panel: Metadata Forms & Components Table */}
-          <div className="lg:w-2/3 space-y-6">
-            {warnings.length > 0 && (
-              <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-start gap-3">
-                <AlertTriangle className="w-5 h-5 text-amber-500 mt-0.5 flex-shrink-0" />
-                <div>
-                  <h5 className="font-bold text-amber-950 text-sm">OCR Warnings Review</h5>
-                  <ul className="text-xs text-amber-700 list-disc list-inside mt-1">
-                    {warnings.map((w, i) => <li key={i}>{w}</li>)}
-                  </ul>
-                </div>
-              </div>
-            )}
+          <div>
+            <h3 className="text-xl font-extrabold text-gray-900">
+              Intelligent OCR Extraction in Progress...
+            </h3>
+            <p className="text-xs text-gray-500 mt-1 font-mono">
+              {extractionStage}
+            </p>
+          </div>
 
-            {totalMismatch && (
-              <div className="bg-red-50 border border-red-200 rounded-2xl p-4 flex items-start gap-3">
-                <AlertCircle className="w-5 h-5 text-red-500 mt-0.5 flex-shrink-0" />
-                <div>
-                  <h5 className="font-bold text-red-950 text-sm">Invoice Total Mismatch</h5>
-                  <p className="text-xs text-red-700 mt-1">
-                    The calculated total of <strong>₹{calculatedTotal.toFixed(2)}</strong> (component totals + taxes - discount) does not match the invoice grand total of <strong>₹{metadata.grand_total.toFixed(2)}</strong> (Difference: <strong>₹{Math.abs(calculatedTotal - metadata.grand_total).toFixed(2)}</strong>).
+          {/* Extraction steps indicator */}
+          <div className="space-y-2 text-left bg-gray-50 rounded-2xl p-4 border border-gray-100 max-w-md mx-auto text-xs">
+            <div className="flex items-center gap-2 text-gray-700">
+              <Check className="w-3.5 h-3.5 text-emerald-600" /> File validation &amp; pre-processing
+            </div>
+            <div className="flex items-center gap-2 text-gray-700">
+              <Loader2 className="w-3.5 h-3.5 text-sky-600 animate-spin" /> Image contrast enhancement &amp; multi-pass Tesseract OCR
+            </div>
+            <div className="flex items-center gap-2 text-gray-400">
+              &bull; Extracting supplier GSTIN, invoice metadata, and line items
+            </div>
+            <div className="flex items-center gap-2 text-gray-400">
+              &bull; Fuzzy matching products with EI HUB inventory records
+            </div>
+          </div>
+
+          {/* Progress bar */}
+          <div className="max-w-md mx-auto">
+            <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden">
+              <div 
+                className="bg-sky-600 h-2 rounded-full transition-all duration-300"
+                style={{ width: `${extractionProgress}%` }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* STEP 3: Professional Split-Screen Verification Interface */}
+      {/* ========================================================================= */}
+      {step === 3 && (
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+          {/* ------------------------------------------------------------- */}
+          {/* LEFT PANEL: Document Preview (5 cols on xl) */}
+          {/* ------------------------------------------------------------- */}
+          <div className="xl:col-span-5 bg-white rounded-3xl border border-gray-200 shadow-xs flex flex-col sticky top-4 max-h-[calc(100vh-120px)] overflow-hidden">
+            {/* Viewer Header & Controls */}
+            <div className="p-3.5 bg-gray-50 border-b border-gray-200 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <FileText className="w-4 h-4 text-sky-600 shrink-0" />
+                <span className="text-xs font-bold text-gray-800 truncate max-w-[140px]" title={file?.name}>
+                  {file?.name || 'Invoice Document'}
+                </span>
+                <span className="text-[10px] uppercase font-bold px-1.5 py-0.5 rounded bg-gray-200 text-gray-700">
+                  {fileType || 'PDF'}
+                </span>
+              </div>
+
+              {/* Zoom & Rotation Toolbar */}
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setZoomLevel(prev => Math.max(50, prev - 15))}
+                  className="p-1.5 rounded-lg hover:bg-gray-200 text-gray-700 transition"
+                  title="Zoom Out"
+                >
+                  <ZoomOut className="w-3.5 h-3.5" />
+                </button>
+                <span className="text-[11px] font-mono font-bold text-gray-600 w-10 text-center">
+                  {zoomLevel}%
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setZoomLevel(prev => Math.min(250, prev + 15))}
+                  className="p-1.5 rounded-lg hover:bg-gray-200 text-gray-700 transition"
+                  title="Zoom In"
+                >
+                  <ZoomIn className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setZoomLevel(100)}
+                  className="text-[10px] font-bold px-2 py-1 rounded hover:bg-gray-200 text-gray-600 transition"
+                  title="Reset Zoom"
+                >
+                  100%
+                </button>
+                <div className="h-4 w-px bg-gray-300 mx-1" />
+                <button
+                  type="button"
+                  onClick={() => setRotation(prev => (prev - 90 + 360) % 360)}
+                  className="p-1.5 rounded-lg hover:bg-gray-200 text-gray-700 transition"
+                  title="Rotate Counter-Clockwise"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRotation(prev => (prev + 90) % 360)}
+                  className="p-1.5 rounded-lg hover:bg-gray-200 text-gray-700 transition"
+                  title="Rotate Clockwise"
+                >
+                  <RotateCw className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Document Canvas / Viewport */}
+            <div className="flex-1 bg-gray-100/70 overflow-auto p-4 flex items-center justify-center min-h-[500px]">
+              {fileType === 'pdf' && previewUrl ? (
+                <div 
+                  className="w-full h-full min-h-[550px] transition-transform duration-200 origin-top flex items-center justify-center"
+                  style={{
+                    transform: `scale(${zoomLevel / 100}) rotate(${rotation}deg)`
+                  }}
+                >
+                  <iframe 
+                    src={previewUrl} 
+                    className="w-full h-[550px] border-0 rounded-xl shadow-md bg-white" 
+                    title="PDF Document Preview" 
+                  />
+                </div>
+              ) : previewUrl ? (
+                <div 
+                  className="transition-transform duration-200 origin-center flex items-center justify-center p-2"
+                  style={{
+                    transform: `scale(${zoomLevel / 100}) rotate(${rotation}deg)`
+                  }}
+                >
+                  <img 
+                    src={previewUrl} 
+                    alt="Uploaded Invoice Preview" 
+                    className="max-w-full max-h-[600px] object-contain rounded-xl shadow-md bg-white" 
+                  />
+                </div>
+              ) : (
+                <div className="text-center text-gray-400 py-16">
+                  <FileText className="w-12 h-12 mx-auto mb-2 opacity-50" />
+                  <p className="text-xs">No preview available</p>
+                </div>
+              )}
+            </div>
+
+            <div className="p-2.5 bg-gray-50 border-t border-gray-200 flex items-center justify-between text-[11px] text-gray-500">
+              <span>File size: {fileSizeStr}</span>
+              <span>Use zoom and rotate to verify small details</span>
+            </div>
+          </div>
+
+          {/* ------------------------------------------------------------- */}
+          {/* RIGHT PANEL: Extracted & Editable Information (7 cols on xl) */}
+          {/* ------------------------------------------------------------- */}
+          <div className="xl:col-span-7 space-y-5">
+            {/* Duplicate Invoice Warning Alert Banner */}
+            {metadata.is_duplicate && (
+              <div className="bg-amber-50 border-2 border-amber-300 rounded-2xl p-4 flex items-start gap-3 shadow-xs">
+                <ShieldAlert className="w-5 h-5 text-amber-600 mt-0.5 shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <h5 className="font-extrabold text-amber-900 text-sm flex items-center gap-2">
+                    Duplicate Invoice Detected in Database
+                  </h5>
+                  <p className="text-xs text-amber-800 mt-0.5">
+                    An invoice with number <strong>#{metadata.invoice_number}</strong> for supplier <strong>{metadata.supplier_name || 'this supplier'}</strong> is already recorded in the EI HUB purchase register.
                   </p>
-                  <p className="text-[10px] text-red-500 mt-1 font-semibold">Please correct row details or PO header fields to resolve this mismatch.</p>
+                  <label className="mt-2.5 inline-flex items-center gap-2 text-xs font-bold text-amber-950 cursor-pointer">
+                    <input 
+                      type="checkbox" 
+                      checked={allowDuplicateCommit}
+                      onChange={(e) => setAllowDuplicateCommit(e.target.checked)}
+                      className="rounded text-amber-600 focus:ring-amber-500 w-4 h-4"
+                    />
+                    I acknowledge this duplicate and explicitly wish to proceed with importation
+                  </label>
                 </div>
               </div>
             )}
 
+            {/* Total Mismatch Warning Alert Banner */}
+            {totalMismatch && (
+              <div className="bg-red-50 border border-red-200 rounded-2xl p-4 flex items-start gap-3 shadow-xs">
+                <AlertCircle className="w-5 h-5 text-red-500 mt-0.5 shrink-0" />
+                <div>
+                  <h5 className="font-bold text-red-950 text-sm">Invoice Financial Reconciliation Mismatch</h5>
+                  <p className="text-xs text-red-700 mt-1">
+                    Calculated Total (line items + tax &minus; discount + round-off): <strong>₹{calculatedGrandTotal.toFixed(2)}</strong> does not equal Invoice Grand Total: <strong>₹{metadata.grand_total.toFixed(2)}</strong> (Difference: <strong>₹{Math.abs(calculatedGrandTotal - metadata.grand_total).toFixed(2)}</strong>).
+                  </p>
+                  <p className="text-[11px] text-red-600 mt-1">
+                    Please correct line item amounts or edit invoice header values below.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Critical Errors Summary */}
             {hasCriticalErrors && (
-              <div className="bg-red-50 border border-red-200 rounded-2xl p-4 flex items-start gap-3">
-                <AlertCircle className="w-5 h-5 text-red-500 mt-0.5 flex-shrink-0" />
-                <div>
-                  <h5 className="font-bold text-red-950 text-sm">Required Corrections Before Confirmation</h5>
-                  <ul className="text-xs text-red-700 list-disc list-inside mt-1 space-y-1">
-                    {criticalErrors.map((err, i) => <li key={i}>{err}</li>)}
-                  </ul>
+              <div className="bg-red-50/70 border border-red-200 rounded-2xl p-3.5 flex items-start gap-2.5">
+                <AlertTriangle className="w-4 h-4 text-red-600 mt-0.5 shrink-0" />
+                <div className="text-xs text-red-800">
+                  <span className="font-bold">Required Corrections: </span>
+                  {criticalErrors.join("; ")}
                 </div>
               </div>
             )}
 
-            {/* Metadata Fields Form */}
-            <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm space-y-4">
-              <h3 className="text-base font-bold text-gray-900 border-b border-gray-100 pb-3">Invoice Header Information</h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
-                <div>
-                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Supplier Name</label>
+            {/* Card 1: Supplier Information */}
+            <div className="bg-white rounded-3xl border border-gray-200 p-5 shadow-xs space-y-4">
+              <div className="flex items-center justify-between border-b border-gray-100 pb-3">
+                <div className="flex items-center gap-2">
+                  <Building2 className="w-4 h-4 text-sky-600" />
+                  <h3 className="text-sm font-extrabold text-gray-900">
+                    Supplier &amp; Vendor Information
+                  </h3>
+                </div>
+                {metadata.supplier_match?.is_existing ? (
+                  <span className="inline-flex items-center gap-1 text-[11px] font-bold px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                    <CheckCheck className="w-3 h-3" /> Verified Existing Supplier
+                  </span>
+                ) : (
+                  <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-sky-50 text-sky-700 border border-sky-200">
+                    + New Supplier Master
+                  </span>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3.5">
+                <div className="sm:col-span-2">
+                  <label className="block text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-1">
+                    Supplier / Vendor Name *
+                  </label>
                   <input 
                     type="text" 
                     value={metadata.supplier_name}
                     onChange={e => handleMetadataChange('supplier_name', e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-xl text-sm font-semibold focus:ring-1 focus:ring-blue-500"
+                    placeholder="Enter supplier or vendor name"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-xl text-xs font-semibold focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
                   />
                 </div>
+
                 <div>
-                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Supplier GSTIN</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-[11px] font-bold text-gray-500 uppercase tracking-wide">
+                      Supplier GSTIN
+                    </label>
+                    {metadata.supplier_gst && (
+                      <span className={`text-[10px] font-bold px-1.5 py-0.2 rounded ${
+                        isValidGSTIN(metadata.supplier_gst) 
+                          ? 'bg-emerald-50 text-emerald-700' 
+                          : 'bg-amber-50 text-amber-700'
+                      }`}>
+                        {isValidGSTIN(metadata.supplier_gst) ? '✓ Valid' : 'Format check'}
+                      </span>
+                    )}
+                  </div>
                   <input 
                     type="text" 
                     value={metadata.supplier_gst}
-                    onChange={e => handleMetadataChange('supplier_gst', e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-xl text-sm font-semibold focus:ring-1 focus:ring-blue-500 font-mono uppercase"
+                    onChange={e => handleMetadataChange('supplier_gst', e.target.value.toUpperCase())}
+                    placeholder="22AAAAA0000A1Z5"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-xl text-xs font-mono font-bold uppercase focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
                   />
                 </div>
+
                 <div>
-                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Invoice Number</label>
+                  <label className="block text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-1">
+                    Contact Phone
+                  </label>
                   <input 
                     type="text" 
-                    value={metadata.invoice_number}
-                    onChange={e => handleMetadataChange('invoice_number', e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-xl text-sm font-semibold focus:ring-1 focus:ring-blue-500 font-mono"
+                    value={metadata.supplier_phone || ''}
+                    onChange={e => handleMetadataChange('supplier_phone', e.target.value)}
+                    placeholder="+91 9876543210"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-xl text-xs focus:ring-2 focus:ring-sky-500"
                   />
                 </div>
-                <div>
-                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Invoice Date</label>
+
+                <div className="sm:col-span-2">
+                  <label className="block text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-1">
+                    Address / State
+                  </label>
                   <input 
                     type="text" 
-                    value={metadata.invoice_date}
-                    onChange={e => handleMetadataChange('invoice_date', e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-xl text-sm font-semibold focus:ring-1 focus:ring-blue-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1">PO Number (Optional)</label>
-                  <input 
-                    type="text" 
-                    value={metadata.po_number}
-                    onChange={e => handleMetadataChange('po_number', e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-xl text-sm font-semibold focus:ring-1 focus:ring-blue-500 font-mono"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Subtotal</label>
-                  <input 
-                    type="number" 
-                    value={metadata.subtotal}
-                    onChange={e => handleMetadataChange('subtotal', e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-xl text-sm font-semibold focus:ring-1 focus:ring-blue-500 font-mono"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1">GST Tax</label>
-                  <input 
-                    type="number" 
-                    value={metadata.gst_tax}
-                    onChange={e => handleMetadataChange('gst_tax', e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-xl text-sm font-semibold focus:ring-1 focus:ring-blue-500 font-mono"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Discount</label>
-                  <input 
-                    type="number" 
-                    value={metadata.discount}
-                    onChange={e => handleMetadataChange('discount', e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-xl text-sm font-semibold focus:ring-1 focus:ring-blue-500 font-mono"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Grand Total</label>
-                  <input 
-                    type="number" 
-                    value={metadata.grand_total}
-                    onChange={e => handleMetadataChange('grand_total', e.target.value)}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-xl text-sm font-bold text-blue-600 focus:ring-1 focus:ring-blue-500"
+                    value={metadata.supplier_address || ''}
+                    onChange={e => handleMetadataChange('supplier_address', e.target.value)}
+                    placeholder="Supplier city, state or street address"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-xl text-xs focus:ring-2 focus:ring-sky-500"
                   />
                 </div>
               </div>
             </div>
 
-            {/* Component Line Items Table Grid */}
-            <div className="bg-white rounded-3xl border border-gray-200 shadow-sm overflow-hidden">
-              <div className="px-6 py-4 bg-gray-50 border-b border-gray-100 flex items-center justify-between">
-                <h3 className="text-base font-bold text-gray-900">Extracted Components</h3>
-                <button onClick={addRow} className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow transition flex items-center gap-1.5">
-                  <Plus className="w-3.5 h-3.5" /> Add Component
-                </button>
+            {/* Card 2: Invoice Details */}
+            <div className="bg-white rounded-3xl border border-gray-200 p-5 shadow-xs space-y-4">
+              <div className="flex items-center justify-between border-b border-gray-100 pb-3">
+                <div className="flex items-center gap-2">
+                  <Hash className="w-4 h-4 text-sky-600" />
+                  <h3 className="text-sm font-extrabold text-gray-900">
+                    Invoice Numbers &amp; Dates
+                  </h3>
+                </div>
+                <span className="text-[11px] text-gray-400">
+                  OCR Confidence: {metadata.confidence?.invoice_number || 95}%
+                </span>
               </div>
 
-              <div className="overflow-x-auto max-h-[400px]">
-                <table className="min-w-full divide-y divide-gray-200">
-                  <thead className="bg-gray-50 sticky top-0 z-10">
-                    <tr>
-                      <th className="px-3 py-3 text-left text-xs font-bold text-gray-500 uppercase">Select</th>
-                      <th className="px-4 py-3 text-left text-xs font-bold text-gray-500 uppercase">Name</th>
-                      <th className="px-3 py-3 text-left text-xs font-bold text-gray-500 uppercase w-28">Category</th>
-                      <th className="px-3 py-3 text-center text-xs font-bold text-gray-500 uppercase w-20">Qty</th>
-                      <th className="px-3 py-3 text-right text-xs font-bold text-gray-500 uppercase w-24">Rate</th>
-                      <th className="px-3 py-3 text-center text-xs font-bold text-gray-500 uppercase w-20">Old Stock</th>
-                      <th className="px-3 py-3 text-center text-xs font-bold text-gray-500 uppercase w-20">New Stock</th>
-                      <th className="px-3 py-3 text-center text-xs font-bold text-gray-500 uppercase">Match</th>
-                      <th className="px-3 py-3 text-center text-xs font-bold text-gray-500 uppercase">Action</th>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-1">
+                    Invoice Number *
+                  </label>
+                  <input 
+                    type="text" 
+                    value={metadata.invoice_number}
+                    onChange={e => handleMetadataChange('invoice_number', e.target.value)}
+                    placeholder="INV-001"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-xl text-xs font-mono font-bold focus:ring-2 focus:ring-sky-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-1">
+                    Invoice Date *
+                  </label>
+                  <input 
+                    type="text" 
+                    value={metadata.invoice_date}
+                    onChange={e => handleMetadataChange('invoice_date', e.target.value)}
+                    placeholder="DD/MM/YYYY"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-xl text-xs font-semibold focus:ring-2 focus:ring-sky-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-1">
+                    Due Date
+                  </label>
+                  <input 
+                    type="text" 
+                    value={metadata.due_date}
+                    onChange={e => handleMetadataChange('due_date', e.target.value)}
+                    placeholder="DD/MM/YYYY"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-xl text-xs focus:ring-2 focus:ring-sky-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-500 uppercase tracking-wide mb-1">
+                    P.O. Reference #
+                  </label>
+                  <input 
+                    type="text" 
+                    value={metadata.po_number}
+                    onChange={e => handleMetadataChange('po_number', e.target.value)}
+                    placeholder="PO-2026-..."
+                    className="w-full px-3 py-2 border border-gray-300 rounded-xl text-xs font-mono focus:ring-2 focus:ring-sky-500"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Card 3: Line Items Table (Practical for 40+ Items) */}
+            <div className="bg-white rounded-3xl border border-gray-200 shadow-xs overflow-hidden">
+              {/* Table Toolbar */}
+              <div className="p-4 bg-gray-50/80 border-b border-gray-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <h3 className="text-sm font-extrabold text-gray-900">
+                    Extracted Line Items
+                  </h3>
+                  <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-sky-100 text-sky-800">
+                    {lineItems.length} items
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2.5">
+                  {/* Search within line items */}
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                    <input 
+                      type="text"
+                      value={itemSearchQuery}
+                      onChange={e => setItemSearchQuery(e.target.value)}
+                      placeholder="Search items / HSN..."
+                      className="pl-8 pr-3 py-1.5 text-xs rounded-xl border border-gray-300 bg-white focus:ring-2 focus:ring-sky-500 w-44 sm:w-56"
+                    />
+                  </div>
+
+                  <button 
+                    onClick={addRow}
+                    className="px-3 py-1.5 bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs rounded-xl shadow-xs transition flex items-center gap-1"
+                  >
+                    <Plus className="w-3.5 h-3.5" /> Add Item
+                  </button>
+                </div>
+              </div>
+
+              {/* Scrollable table container supporting 40+ items with sticky header */}
+              <div className="overflow-x-auto max-h-[460px] overflow-y-auto">
+                <table className="min-w-full divide-y divide-gray-200 text-xs">
+                  <thead className="bg-gray-50/95 backdrop-blur-xs sticky top-0 z-10 border-b border-gray-200">
+                    <tr className="text-gray-500 font-bold uppercase tracking-wider text-[10px]">
+                      <th className="px-3 py-2.5 text-center w-8">
+                        <input 
+                          type="checkbox" 
+                          checked={lineItems.length > 0 && lineItems.every(r => r.selected)}
+                          onChange={(e) => {
+                            const val = e.target.checked;
+                            setLineItems(prev => prev.map(r => ({ ...r, selected: val })));
+                          }}
+                          className="rounded border-gray-300 text-sky-600 focus:ring-sky-500 w-3.5 h-3.5"
+                        />
+                      </th>
+                      <th className="px-3 py-2.5 text-left min-w-[200px]">Item Name &amp; Description</th>
+                      <th className="px-2 py-2.5 text-center w-20">HSN</th>
+                      <th className="px-2 py-2.5 text-center w-16">Qty</th>
+                      <th className="px-2 py-2.5 text-center w-20">Unit</th>
+                      <th className="px-2 py-2.5 text-right w-24">Rate (₹)</th>
+                      <th className="px-2 py-2.5 text-center w-16">Disc%</th>
+                      <th className="px-2 py-2.5 text-right w-24">Total (₹)</th>
+                      <th className="px-3 py-2.5 text-center min-w-[150px]">Master Matching</th>
+                      <th className="px-2 py-2.5 text-center w-10">Del</th>
                     </tr>
                   </thead>
-                  <tbody className="bg-white divide-y divide-gray-200">
-                    {lineItems.map((item, idx) => (
-                      <tr key={item.id} className="hover:bg-gray-50/50">
-                        <td className="px-3 py-3 whitespace-nowrap text-center">
-                          <input 
-                            type="checkbox" 
-                            checked={!!item.selected}
-                            onChange={() => {
-                              const updated = [...lineItems];
-                              updated[idx].selected = !updated[idx].selected;
-                              setLineItems(updated);
-                            }}
-                            className="rounded border-gray-300 text-blue-600 focus:ring-blue-500 w-4 h-4"
-                          />
-                        </td>
-                        <td className="px-3 py-1.5">
-                          <div className="flex flex-col min-w-[200px]">
+                  <tbody className="bg-white divide-y divide-gray-100">
+                    {filteredLineItems.map((item) => {
+                      const actualIdx = lineItems.findIndex(r => r.id === item.id);
+                      return (
+                        <tr key={item.id} className={`hover:bg-sky-50/30 transition-colors ${!item.selected ? 'opacity-40 bg-gray-50' : ''}`}>
+                          <td className="px-3 py-2 text-center whitespace-nowrap">
+                            <input 
+                              type="checkbox" 
+                              checked={!!item.selected}
+                              onChange={() => {
+                                const updated = [...lineItems];
+                                updated[actualIdx].selected = !updated[actualIdx].selected;
+                                setLineItems(updated);
+                              }}
+                              className="rounded border-gray-300 text-sky-600 focus:ring-sky-500 w-3.5 h-3.5"
+                            />
+                          </td>
+
+                          {/* Item Name */}
+                          <td className="px-3 py-2">
                             <input 
                               type="text" 
                               value={item.item_name}
-                              onChange={e => handleCellEdit(idx, 'item_name', e.target.value)}
-                              className="w-full px-2.5 py-1 border border-transparent focus:border-blue-500 bg-transparent hover:bg-gray-100/50 focus:bg-white rounded-xl text-sm font-semibold"
+                              onChange={e => handleCellEdit(actualIdx, 'item_name', e.target.value)}
+                              className="w-full px-2 py-1 rounded-lg border border-transparent hover:border-gray-200 focus:border-sky-500 bg-transparent focus:bg-white text-xs font-semibold"
                             />
-                            {item.errors && item.errors.length > 0 && (
-                              <span className="text-[10px] text-red-500 font-bold px-2 mt-0.5">{item.errors.join(", ")}</span>
+                            {item.warnings && item.warnings.length > 0 && (
+                              <p className="text-[10px] text-amber-600 font-medium px-2 mt-0.5">
+                                {item.warnings.join(", ")}
+                              </p>
                             )}
-                            {item.warnings && item.warnings.length > 0 && !item.status.includes("POSSIBLE MATCH") && (
-                              <span className="text-[10px] text-amber-500 font-bold px-2 mt-0.5">{item.warnings.join(", ")}</span>
-                            )}
-                          </div>
-                        </td>
-                        <td className="px-3 py-1.5 whitespace-nowrap">
-                          <div className="flex flex-col">
+                          </td>
+
+                          {/* HSN Code */}
+                          <td className="px-2 py-2">
                             <input 
                               type="text" 
-                              value={item.category}
-                              onChange={e => handleCellEdit(idx, 'category', e.target.value)}
-                              className={`w-full px-2 py-1 border border-transparent focus:border-blue-500 bg-transparent hover:bg-gray-100/50 focus:bg-white rounded-xl text-xs font-bold ${
-                                item.category === 'Select Category' ? 'text-red-500 italic' : ''
-                              }`}
+                              value={item.hsn_code || ''}
+                              onChange={e => handleCellEdit(actualIdx, 'hsn_code', e.target.value)}
+                              placeholder="HSN"
+                              className="w-full px-1.5 py-1 rounded-lg border border-transparent hover:border-gray-200 focus:border-sky-500 bg-transparent focus:bg-white text-xs text-center font-mono"
                             />
-                            {item.category === 'Select Category' && (
-                              <span className="text-[9px] text-red-500 font-extrabold px-2 mt-0.5">⚠ Required</span>
-                            )}
-                          </div>
-                        </td>
-                        <td className="px-3 py-1.5 whitespace-nowrap">
-                          <input 
-                            type="number" 
-                            value={item.quantity}
-                            onChange={e => handleCellEdit(idx, 'quantity', e.target.value)}
-                            className="w-full px-2 py-1 border border-transparent focus:border-blue-500 bg-transparent hover:bg-gray-100/50 focus:bg-white rounded-xl text-sm font-bold text-center font-mono"
-                          />
-                        </td>
-                        <td className="px-3 py-1.5 whitespace-nowrap">
-                          <input 
-                            type="number" 
-                            step="0.01"
-                            value={item.unit_price}
-                            onChange={e => handleCellEdit(idx, 'unit_price', e.target.value)}
-                            className="w-full px-2 py-1 border border-transparent focus:border-blue-500 bg-transparent hover:bg-gray-100/50 focus:bg-white rounded-xl text-sm font-mono text-right"
-                          />
-                        </td>
-                        <td className="px-3 py-3 text-center whitespace-nowrap text-xs text-gray-500 font-mono">
-                          {item.old_stock}
-                        </td>
-                        <td className="px-3 py-3 text-center whitespace-nowrap text-xs text-blue-600 font-bold font-mono">
-                          {item.new_stock}
-                        </td>
-                        <td className="px-3 py-3 whitespace-nowrap text-center">
-                          {(() => {
-                            const status = item.status || '';
-                            if (status.includes('✓ VERIFIED EXISTING') || status === 'EXISTING') {
-                              return <span className="bg-green-50 text-green-700 text-[10px] px-2 py-0.5 rounded-full font-bold border border-green-200">✓ VERIFIED EXISTING</span>;
-                            }
-                            if (status.includes('✓ VERIFIED NEW') || status === 'NEW') {
-                              return <span className="bg-blue-50 text-blue-700 text-[10px] px-2 py-0.5 rounded-full font-bold border border-blue-200">✓ VERIFIED NEW</span>;
-                            }
-                            if (status.includes('POSSIBLE MATCH')) {
-                              return (
-                                <div className="flex flex-col items-center gap-1">
-                                  <span className="bg-amber-50 text-amber-800 text-[10px] px-2 py-0.5 rounded-full font-bold border border-amber-200">⚠ POSSIBLE MATCH</span>
-                                  {item.possible_match && (
-                                    <div className="flex flex-col items-center gap-0.5">
-                                      <span className="text-[9px] text-gray-500 font-medium">Match: {item.possible_match.name} ({item.possible_match.similarity}%)</span>
-                                      <div className="flex gap-1.5 mt-1">
-                                        <button 
-                                          onClick={() => {
-                                            handleCellEdit(idx, 'item_name', item.possible_match!.name);
-                                            handleVerifyAfterEdit(idx, { 
-                                              ...item, 
-                                              item_name: item.possible_match!.name, 
-                                              status: '✓ VERIFIED EXISTING', 
-                                              is_existing: true, 
-                                              is_new: false, 
-                                              possible_match: null 
-                                            });
-                                          }} 
-                                          className="px-1.5 py-0.5 bg-green-600 hover:bg-green-700 text-white text-[9px] font-bold rounded shadow-sm transition"
-                                        >
-                                          Accept Match
-                                        </button>
-                                        <button 
-                                          onClick={() => {
-                                            const updated = [...lineItems];
-                                            updated[idx] = { ...updated[idx], accepted_as_new: true };
-                                            setLineItems(updated);
-                                            setTimeout(handleVerify, 100);
-                                          }} 
-                                          className="px-1.5 py-0.5 bg-gray-500 hover:bg-gray-600 text-white text-[9px] font-bold rounded shadow-sm transition"
-                                        >
-                                          Treat as New
-                                        </button>
-                                      </div>
-                                    </div>
-                                  )}
+                          </td>
+
+                          {/* Quantity */}
+                          <td className="px-2 py-2">
+                            <input 
+                              type="number" 
+                              value={item.quantity}
+                              onChange={e => handleCellEdit(actualIdx, 'quantity', e.target.value)}
+                              className="w-full px-1.5 py-1 rounded-lg border border-transparent hover:border-gray-200 focus:border-sky-500 bg-transparent focus:bg-white text-xs text-center font-bold font-mono"
+                            />
+                          </td>
+
+                          {/* Unit dropdown */}
+                          <td className="px-2 py-2">
+                            <select
+                              value={item.unit || 'pcs'}
+                              onChange={e => handleCellEdit(actualIdx, 'unit', e.target.value)}
+                              className="w-full px-1 py-1 rounded-lg border border-transparent hover:border-gray-200 focus:border-sky-500 bg-transparent focus:bg-white text-xs text-center"
+                            >
+                              <option value="pcs">pcs</option>
+                              <option value="nos">nos</option>
+                              <option value="pkts">pkts</option>
+                              <option value="mtr">mtr</option>
+                              <option value="kg">kg</option>
+                              <option value="box">box</option>
+                              <option value="set">set</option>
+                            </select>
+                          </td>
+
+                          {/* Rate */}
+                          <td className="px-2 py-2 text-right">
+                            <input 
+                              type="number" 
+                              step="0.01"
+                              value={item.unit_price}
+                              onChange={e => handleCellEdit(actualIdx, 'unit_price', e.target.value)}
+                              className="w-full px-1.5 py-1 rounded-lg border border-transparent hover:border-gray-200 focus:border-sky-500 bg-transparent focus:bg-white text-xs text-right font-mono"
+                            />
+                          </td>
+
+                          {/* Discount % */}
+                          <td className="px-2 py-2 text-center">
+                            <input 
+                              type="number" 
+                              step="0.5"
+                              value={item.discount || 0}
+                              onChange={e => handleCellEdit(actualIdx, 'discount', e.target.value)}
+                              className="w-full px-1 py-1 rounded-lg border border-transparent hover:border-gray-200 focus:border-sky-500 bg-transparent focus:bg-white text-xs text-center font-mono"
+                            />
+                          </td>
+
+                          {/* Total */}
+                          <td className="px-2 py-2 text-right font-mono font-bold text-gray-900">
+                            ₹{item.total.toFixed(2)}
+                          </td>
+
+                          {/* Master Matching Status */}
+                          <td className="px-3 py-2 text-center whitespace-nowrap">
+                            {item.status.includes('✓ VERIFIED EXISTING') ? (
+                              <div className="flex flex-col items-center">
+                                <span className="bg-emerald-50 text-emerald-700 text-[10px] px-2 py-0.5 rounded-full font-bold border border-emerald-200 flex items-center gap-1">
+                                  <Check className="w-2.5 h-2.5" /> Existing ({item.old_stock} &rarr; {item.new_stock})
+                                </span>
+                              </div>
+                            ) : item.status.includes('POSSIBLE MATCH') && !item.accepted_as_new ? (
+                              <div className="flex flex-col items-center gap-1">
+                                <span className="bg-amber-50 text-amber-800 text-[10px] px-2 py-0.5 rounded-full font-bold border border-amber-200">
+                                  ⚠ Possible Match ({item.possible_match?.similarity}%)
+                                </span>
+                                <span className="text-[10px] text-gray-500 truncate max-w-[130px]">
+                                  {item.possible_match?.name}
+                                </span>
+                                <div className="flex items-center gap-1">
+                                  <button
+                                    onClick={() => {
+                                      const updated = [...lineItems];
+                                      updated[actualIdx] = {
+                                        ...updated[actualIdx],
+                                        item_name: item.possible_match!.name,
+                                        status: '✓ VERIFIED EXISTING',
+                                        is_existing: true,
+                                        is_new: false,
+                                        possible_match: null
+                                      };
+                                      setLineItems(updated);
+                                      setTimeout(handleVerify, 100);
+                                    }}
+                                    className="px-1.5 py-0.5 bg-emerald-600 hover:bg-emerald-700 text-white text-[9px] font-bold rounded"
+                                  >
+                                    Accept
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      const updated = [...lineItems];
+                                      updated[actualIdx] = {
+                                        ...updated[actualIdx],
+                                        accepted_as_new: true,
+                                        status: '✓ VERIFIED NEW'
+                                      };
+                                      setLineItems(updated);
+                                    }}
+                                    className="px-1.5 py-0.5 bg-gray-500 hover:bg-gray-600 text-white text-[9px] font-bold rounded"
+                                  >
+                                    Treat as New
+                                  </button>
                                 </div>
-                              );
-                            }
-                            if (status.includes('LOW OCR CONFIDENCE')) {
-                              return <span className="bg-amber-50 text-amber-700 text-[10px] px-2 py-0.5 rounded-full font-bold border border-amber-200">⚠ LOW OCR CONFIDENCE</span>;
-                            }
-                            if (status.includes('NEEDS EDIT')) {
-                              return <span className="bg-amber-50 text-amber-600 text-[10px] px-2 py-0.5 rounded-full font-bold border border-amber-200">⚠ NEEDS EDIT</span>;
-                            }
-                            if (status.includes('TOTAL MISMATCH')) {
-                              return <span className="bg-red-50 text-red-700 text-[10px] px-2 py-0.5 rounded-full font-bold border border-red-200">✕ TOTAL MISMATCH</span>;
-                            }
-                            return <span className="bg-red-50 text-red-700 text-[10px] px-2 py-0.5 rounded-full font-bold border border-red-200">✕ INVALID</span>;
-                          })()}
-                        </td>
-                        <td className="px-3 py-3 text-center whitespace-nowrap">
-                          <button onClick={() => deleteRow(idx)} className="text-gray-400 hover:text-red-500 transition">
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                    {lineItems.length === 0 && (
+                              </div>
+                            ) : (
+                              <span className="bg-sky-50 text-sky-700 text-[10px] px-2 py-0.5 rounded-full font-bold border border-sky-200">
+                                + New Item
+                              </span>
+                            )}
+                          </td>
+
+                          {/* Delete Action */}
+                          <td className="px-2 py-2 text-center">
+                            <button
+                              onClick={() => deleteRow(actualIdx)}
+                              className="text-gray-400 hover:text-red-500 transition p-1"
+                              title="Exclude item"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+
+                    {filteredLineItems.length === 0 && (
                       <tr>
-                        <td colSpan={9} className="px-4 py-8 text-center text-sm text-gray-400 font-semibold">
-                          All items excluded or empty. Click Add Component above.
+                        <td colSpan={10} className="px-4 py-8 text-center text-xs text-gray-400">
+                          {lineItems.length === 0 ? "No line items extracted. Click '+ Add Item' above." : "No matching items found for search query."}
                         </td>
                       </tr>
                     )}
                   </tbody>
                 </table>
               </div>
-              
-              <div className="p-4 bg-gray-50 border-t border-gray-100 text-right">
-                <button onClick={handleVerify} className="px-4 py-2 border border-gray-200 hover:bg-gray-50 text-gray-700 font-bold text-xs rounded-xl shadow-sm transition">
-                  Re-Verify Items
+
+              {/* Table Footer */}
+              <div className="p-3 bg-gray-50 border-t border-gray-200 flex items-center justify-between text-xs">
+                <span className="text-gray-500 font-medium">
+                  {lineItems.filter(r => r.selected).length} of {lineItems.length} items selected for inventory write
+                </span>
+                <button
+                  onClick={handleVerify}
+                  disabled={isVerifying}
+                  className="px-3.5 py-1.5 border border-gray-300 hover:bg-white bg-white text-gray-700 font-bold rounded-xl shadow-xs transition flex items-center gap-1.5"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isVerifying ? 'animate-spin text-sky-600' : ''}`} />
+                  Re-Verify Against Catalog
                 </button>
               </div>
             </div>
 
-            {/* Excluded Non-Component items */}
+            {/* Excluded Non-Component Lines (Delivery, Courier, Freight) */}
             {excludedItems.length > 0 && (
-              <div className="bg-gray-50 rounded-3xl border border-gray-200 p-6 shadow-sm space-y-4">
-                <div>
-                  <h4 className="font-bold text-gray-800 text-sm">Excluded Invoice Lines</h4>
-                  <p className="text-xs text-gray-500">Lines identified as non-component expenses (shipping, taxes). You can restore them if needed.</p>
+              <div className="bg-gray-50 rounded-2xl border border-gray-200 p-4 space-y-2">
+                <div className="flex items-center justify-between">
+                  <h4 className="font-bold text-gray-800 text-xs">Excluded Overhead &amp; Expense Lines</h4>
+                  <span className="text-[11px] text-gray-500">{excludedItems.length} lines</span>
                 </div>
-                
-                <div className="space-y-2">
+                <div className="space-y-1.5">
                   {excludedItems.map((item, idx) => (
-                    <div key={item.id} className="flex items-center justify-between p-3 bg-white rounded-2xl border border-gray-100 shadow-sm text-xs font-semibold">
-                      <div className="flex-1 min-w-0">
-                        <p className="text-gray-900 truncate font-bold">{item.item_name}</p>
-                        <span className="text-[10px] text-gray-400 font-mono">Qty: {item.quantity} | Total: ₹{item.total.toFixed(2)}</span>
+                    <div key={item.id} className="flex items-center justify-between p-2.5 bg-white rounded-xl border border-gray-100 text-xs">
+                      <div>
+                        <span className="font-bold text-gray-800">{item.item_name}</span>
+                        <span className="ml-2 font-mono text-gray-500">₹{item.total.toFixed(2)}</span>
                       </div>
-                      <button onClick={() => restoreExcludedItem(idx)} className="px-3 py-1 bg-blue-50 text-blue-700 hover:bg-blue-100 text-[10px] font-bold rounded-lg transition">
-                        Restore as Component
+                      <button
+                        onClick={() => restoreExcludedItem(idx)}
+                        className="px-2.5 py-1 bg-sky-50 hover:bg-sky-100 text-sky-700 text-[10px] font-bold rounded-lg transition"
+                      >
+                        Restore as Line Item
                       </button>
                     </div>
                   ))}
@@ -832,15 +1439,127 @@ export const PurchaseBillImport: React.FC = () => {
               </div>
             )}
 
-            {/* Stepper controls */}
-            <div className="flex justify-between items-center bg-white p-4 rounded-3xl border border-gray-200">
-              <button onClick={resetWizard} className="text-gray-500 hover:text-black font-semibold text-sm">
-                Clear
+            {/* Card 4: Tax Breakdown & Financial Totals Reconciliation */}
+            <div className="bg-white rounded-3xl border border-gray-200 p-5 shadow-xs space-y-4">
+              <div className="flex items-center justify-between border-b border-gray-100 pb-3">
+                <div className="flex items-center gap-2">
+                  <DollarSign className="w-4 h-4 text-emerald-600" />
+                  <h3 className="text-sm font-extrabold text-gray-900">
+                    Tax Breakdown &amp; Grand Total Calculations
+                  </h3>
+                </div>
+                <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${
+                  totalMismatch ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                }`}>
+                  {totalMismatch ? '⚠ Total Mismatch' : '✓ Reconciled'}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5 text-xs">
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-500 uppercase mb-1">
+                    Taxable Amount (₹)
+                  </label>
+                  <input 
+                    type="number"
+                    step="0.01"
+                    value={metadata.taxable_amount}
+                    onChange={e => handleMetadataChange('taxable_amount', e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-xl font-mono font-bold"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-500 uppercase mb-1">
+                    CGST (₹)
+                  </label>
+                  <input 
+                    type="number"
+                    step="0.01"
+                    value={metadata.cgst}
+                    onChange={e => handleMetadataChange('cgst', e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-xl font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-500 uppercase mb-1">
+                    SGST (₹)
+                  </label>
+                  <input 
+                    type="number"
+                    step="0.01"
+                    value={metadata.sgst}
+                    onChange={e => handleMetadataChange('sgst', e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-xl font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-500 uppercase mb-1">
+                    IGST (₹)
+                  </label>
+                  <input 
+                    type="number"
+                    step="0.01"
+                    value={metadata.igst}
+                    onChange={e => handleMetadataChange('igst', e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-xl font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-500 uppercase mb-1">
+                    Discount (₹)
+                  </label>
+                  <input 
+                    type="number"
+                    step="0.01"
+                    value={metadata.discount}
+                    onChange={e => handleMetadataChange('discount', e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-xl font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-gray-500 uppercase mb-1">
+                    Round-off (₹)
+                  </label>
+                  <input 
+                    type="number"
+                    step="0.01"
+                    value={metadata.round_off}
+                    onChange={e => handleMetadataChange('round_off', e.target.value)}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-xl font-mono"
+                  />
+                </div>
+
+                <div className="col-span-2 bg-sky-50/60 p-3 rounded-2xl border border-sky-100 flex items-center justify-between">
+                  <div>
+                    <span className="text-[10px] font-bold text-sky-900 uppercase tracking-wide">Invoice Grand Total</span>
+                    <p className="text-base font-black text-sky-700 font-mono">₹{metadata.grand_total.toFixed(2)}</p>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-[10px] font-bold text-gray-500 uppercase">Calculated</span>
+                    <p className="text-sm font-bold text-gray-800 font-mono">₹{calculatedGrandTotal.toFixed(2)}</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Bottom Actions Bar */}
+            <div className="flex items-center justify-between bg-white p-4 rounded-3xl border border-gray-200">
+              <button
+                onClick={resetWizard}
+                className="text-xs font-semibold text-gray-500 hover:text-gray-900 px-3 py-2"
+              >
+                Clear &amp; Start Over
               </button>
-              <button 
-                onClick={() => setStep(4)} 
+
+              <button
+                onClick={() => setStep(4)}
                 disabled={hasCriticalErrors || lineItems.filter(r => r.selected).length === 0}
-                className="px-6 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm rounded-2xl shadow disabled:opacity-50 transition flex items-center gap-1.5"
+                className="px-6 py-2.5 bg-sky-600 hover:bg-sky-700 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-md transition-all flex items-center gap-2"
               >
                 Proceed to Confirmation
                 <ArrowRight className="w-4 h-4" />
@@ -850,205 +1569,200 @@ export const PurchaseBillImport: React.FC = () => {
         </div>
       )}
 
-      {/* STEP 4: Confirmation Checklist & Metrics */}
+      {/* ========================================================================= */}
+      {/* STEP 4: Confirmation Checklist & Metrics Modal */}
+      {/* ========================================================================= */}
       {step === 4 && (
-        <div className="max-w-4xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2 space-y-6">
-            {/* Checklist Card */}
-            <div className="bg-white rounded-3xl border border-gray-200 p-6 shadow-sm space-y-5">
-              <div>
-                <h3 className="text-lg font-bold text-gray-900">Administrator Verification Checklist</h3>
-                <p className="text-xs text-gray-500 mt-0.5">Please check all boxes after verifying OCR details against the original invoice document.</p>
+        <div className="max-w-3xl mx-auto space-y-6">
+          <div className="bg-white rounded-3xl border border-gray-200 p-6 sm:p-8 shadow-md space-y-6">
+            <div className="border-b border-gray-100 pb-4">
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-50 text-emerald-700 text-xs font-bold mb-2">
+                <CheckCircle2 className="w-3.5 h-3.5" /> Verification Checklist
               </div>
+              <h3 className="text-xl font-extrabold text-gray-900">
+                Final Review &amp; Inventory Write Confirmation
+              </h3>
+              <p className="text-xs text-gray-500 mt-1">
+                Please verify each check below to commit this purchase bill atomically to the database register.
+              </p>
+            </div>
 
-              <div className="space-y-3">
-                <label className="flex items-start gap-3 p-3.5 rounded-2xl border border-gray-100 hover:bg-gray-50 cursor-pointer select-none">
-                  <input 
-                    type="checkbox" 
-                    checked={checklist.details}
-                    onChange={() => setChecklist(prev => ({ ...prev, details: !prev.details }))}
-                    className="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500 w-4.5 h-4.5"
-                  />
-                  <div>
-                    <span className="text-sm font-bold text-gray-800">I have verified the invoice details</span>
-                    <p className="text-xs text-gray-400 mt-0.5">Supplier Name, Date, Invoice Reference, and GSTIN entries are correct.</p>
-                  </div>
-                </label>
-
-                <label className="flex items-start gap-3 p-3.5 rounded-2xl border border-gray-100 hover:bg-gray-50 cursor-pointer select-none">
-                  <input 
-                    type="checkbox" 
-                    checked={checklist.components}
-                    onChange={() => setChecklist(prev => ({ ...prev, components: !prev.components }))}
-                    className="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500 w-4.5 h-4.5"
-                  />
-                  <div>
-                    <span className="text-sm font-bold text-gray-800">I have verified the component names and quantities</span>
-                    <p className="text-xs text-gray-400 mt-0.5">Component catalog lookup entries map correctly without spelling mistakes.</p>
-                  </div>
-                </label>
-
-                <label className="flex items-start gap-3 p-3.5 rounded-2xl border border-gray-100 hover:bg-gray-50 cursor-pointer select-none">
-                  <input 
-                    type="checkbox" 
-                    checked={checklist.stock}
-                    onChange={() => setChecklist(prev => ({ ...prev, stock: !prev.stock }))}
-                    className="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500 w-4.5 h-4.5"
-                  />
-                  <div>
-                    <span className="text-sm font-bold text-gray-800">I have verified stock changes</span>
-                    <p className="text-xs text-gray-400 mt-0.5">The resulting math (Existing Stock + Purchased Qty = New Stock) is correct.</p>
-                  </div>
-                </label>
-
-                <label className="flex items-start gap-3 p-3.5 rounded-2xl border border-gray-100 hover:bg-gray-50 cursor-pointer select-none">
-                  <input 
-                    type="checkbox" 
-                    checked={checklist.total}
-                    onChange={() => setChecklist(prev => ({ ...prev, total: !prev.total }))}
-                    className="mt-0.5 rounded border-gray-300 text-blue-600 focus:ring-blue-500 w-4.5 h-4.5"
-                  />
-                  <div>
-                    <span className="text-sm font-bold text-gray-800">I have verified the invoice total</span>
-                    <p className="text-xs text-gray-400 mt-0.5">The item row totals sum up correctly to the grand total in the header.</p>
-                  </div>
-                </label>
-
-                {totalMismatch && (
-                  <label className="flex items-start gap-3 p-3.5 rounded-2xl border border-red-100 bg-red-50/50 hover:bg-red-50 cursor-pointer select-none mt-2">
-                    <input 
-                      type="checkbox" 
-                      checked={acknowledgeMismatch}
-                      onChange={() => setAcknowledgeMismatch(!acknowledgeMismatch)}
-                      className="mt-0.5 rounded border-red-300 text-red-600 focus:ring-red-500 w-4.5 h-4.5"
-                    />
-                    <div>
-                      <span className="text-sm font-bold text-red-950">Acknowledge Invoice Total Mismatch</span>
-                      <p className="text-xs text-red-800 mt-0.5">
-                        I acknowledge the difference of ₹{Math.abs(calculatedTotal - metadata.grand_total).toFixed(2)} between the calculated total and the invoice total, and explicitly verify this is acceptable.
-                      </p>
-                    </div>
-                  </label>
-                )}
+            {/* Summary Cards Grid */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="bg-gray-50 p-3.5 rounded-2xl border border-gray-100 text-center">
+                <span className="text-xs text-gray-500 font-semibold">Invoice #</span>
+                <p className="text-sm font-bold text-gray-900 font-mono mt-0.5 truncate">{metadata.invoice_number}</p>
+              </div>
+              <div className="bg-gray-50 p-3.5 rounded-2xl border border-gray-100 text-center">
+                <span className="text-xs text-gray-500 font-semibold">Supplier</span>
+                <p className="text-sm font-bold text-gray-900 truncate mt-0.5">{metadata.supplier_name}</p>
+              </div>
+              <div className="bg-gray-50 p-3.5 rounded-2xl border border-gray-100 text-center">
+                <span className="text-xs text-gray-500 font-semibold">Total Stock Units</span>
+                <p className="text-sm font-black text-emerald-600 mt-0.5">
+                  +{lineItems.filter(r => r.selected).reduce((acc, r) => acc + r.quantity, 0)} units
+                </p>
+              </div>
+              <div className="bg-gray-50 p-3.5 rounded-2xl border border-gray-100 text-center">
+                <span className="text-xs text-gray-500 font-semibold">Grand Total</span>
+                <p className="text-sm font-black text-sky-600 font-mono mt-0.5">₹{metadata.grand_total.toFixed(2)}</p>
               </div>
             </div>
-          </div>
 
-          {/* Import summary card */}
-          <div className="space-y-6">
-            <div className="bg-white rounded-3xl border border-gray-200 shadow-md overflow-hidden">
-              <div className="p-6 border-b border-gray-100 bg-gray-50">
-                <h3 className="text-lg font-bold text-gray-900">Purchase Summary</h3>
-                <p className="text-xs text-gray-500 mt-0.5">Summary of transaction changes to write to database.</p>
-              </div>
+            {/* Verification Checklist */}
+            <div className="space-y-3">
+              <label className="flex items-start gap-3 p-3.5 rounded-2xl border border-gray-200 hover:bg-gray-50 cursor-pointer select-none">
+                <input 
+                  type="checkbox" 
+                  checked={checklist.details}
+                  onChange={() => setChecklist(prev => ({ ...prev, details: !prev.details }))}
+                  className="mt-0.5 rounded border-gray-300 text-sky-600 focus:ring-sky-500 w-4 h-4"
+                />
+                <div>
+                  <span className="text-xs font-bold text-gray-900">1. Verified Supplier Details &amp; GSTIN</span>
+                  <p className="text-[11px] text-gray-500">Supplier name, GSTIN code, invoice number, and dates accurately match the bill.</p>
+                </div>
+              </label>
 
-              <div className="p-6 space-y-4 text-sm">
-                <div className="flex justify-between py-1.5 border-b border-gray-100">
-                  <span className="text-gray-500">Supplier:</span>
-                  <span className="font-bold text-gray-900 truncate max-w-[150px]">{metadata.supplier_name}</span>
+              <label className="flex items-start gap-3 p-3.5 rounded-2xl border border-gray-200 hover:bg-gray-50 cursor-pointer select-none">
+                <input 
+                  type="checkbox" 
+                  checked={checklist.components}
+                  onChange={() => setChecklist(prev => ({ ...prev, components: !prev.components }))}
+                  className="mt-0.5 rounded border-gray-300 text-sky-600 focus:ring-sky-500 w-4 h-4"
+                />
+                <div>
+                  <span className="text-xs font-bold text-gray-900">2. Verified Item Names &amp; HSN Codes</span>
+                  <p className="text-[11px] text-gray-500">All line items, quantities, and units map to intended hardware components.</p>
                 </div>
-                <div className="flex justify-between py-1.5 border-b border-gray-100">
-                  <span className="text-gray-500">Invoice:</span>
-                  <span className="font-bold text-gray-900 font-mono">{metadata.invoice_number}</span>
-                </div>
-                <div className="flex justify-between py-1.5 border-b border-gray-100">
-                  <span className="text-gray-500">Taxes (GST):</span>
-                  <span className="font-bold text-gray-900 font-mono">₹{metadata.gst_tax.toFixed(2)}</span>
-                </div>
-                <div className="flex justify-between py-1.5 border-b border-gray-100">
-                  <span className="text-gray-500">New Components:</span>
-                  <span className="font-bold text-blue-600">+{lineItems.filter(r => r.selected && r.is_new).length}</span>
-                </div>
-                <div className="flex justify-between py-1.5 border-b border-gray-100">
-                  <span className="text-gray-500">Existing Components:</span>
-                  <span className="font-bold text-purple-600">+{lineItems.filter(r => r.selected && r.is_existing).length}</span>
-                </div>
-                <div className="flex justify-between py-1.5 border-b border-gray-100 bg-green-50/20 px-3 -mx-3 rounded-xl">
-                  <span className="text-green-950 font-bold">Total stock units:</span>
-                  <span className="font-black text-green-600">+{lineItems.filter(r => r.selected).reduce((acc, r) => acc + r.quantity, 0)} units</span>
-                </div>
-                <div className="flex justify-between py-1.5 bg-blue-50/20 px-3 -mx-3 rounded-xl border-t border-blue-100 mt-2">
-                  <span className="text-blue-950 font-bold">Grand Total Cost:</span>
-                  <span className="font-black text-blue-600 font-mono">₹{metadata.grand_total.toFixed(2)}</span>
-                </div>
-              </div>
+              </label>
 
-              <div className="p-6 bg-gray-50 border-t border-gray-100 space-y-3">
-                <button 
-                  onClick={handleConfirmPurchase}
-                  disabled={
-                    isConfirming || 
-                    hasCriticalErrors || 
-                    !(checklist.details && checklist.components && checklist.stock && checklist.total) || 
-                    (totalMismatch && !acknowledgeMismatch)
-                  }
-                  className="w-full py-3 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white font-extrabold text-sm rounded-2xl shadow-md hover:shadow-lg transition flex items-center justify-center gap-2"
-                >
-                  {isConfirming ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
-                  Confirm Purchase & Update Stock
-                </button>
-                <button 
-                  onClick={() => setStep(3)} 
-                  className="w-full py-2.5 bg-white border border-gray-200 hover:bg-gray-50 text-gray-700 font-bold text-xs rounded-xl transition text-center"
-                >
-                  &larr; Back to Editor
-                </button>
-              </div>
+              <label className="flex items-start gap-3 p-3.5 rounded-2xl border border-gray-200 hover:bg-gray-50 cursor-pointer select-none">
+                <input 
+                  type="checkbox" 
+                  checked={checklist.stock}
+                  onChange={() => setChecklist(prev => ({ ...prev, stock: !prev.stock }))}
+                  className="mt-0.5 rounded border-gray-300 text-sky-600 focus:ring-sky-500 w-4 h-4"
+                />
+                <div>
+                  <span className="text-xs font-bold text-gray-900">3. Verified Stock Increments</span>
+                  <p className="text-[11px] text-gray-500">New inventory stock math (Existing Stock + Purchased Quantity = New Stock) is correct.</p>
+                </div>
+              </label>
+
+              <label className="flex items-start gap-3 p-3.5 rounded-2xl border border-gray-200 hover:bg-gray-50 cursor-pointer select-none">
+                <input 
+                  type="checkbox" 
+                  checked={checklist.total}
+                  onChange={() => setChecklist(prev => ({ ...prev, total: !prev.total }))}
+                  className="mt-0.5 rounded border-gray-300 text-sky-600 focus:ring-sky-500 w-4 h-4"
+                />
+                <div>
+                  <span className="text-xs font-bold text-gray-900">4. Verified Financials &amp; GST Taxes</span>
+                  <p className="text-[11px] text-gray-500">Tax amounts (CGST, SGST, IGST) and grand total correspond to the supplier's charge.</p>
+                </div>
+              </label>
+
+              {totalMismatch && (
+                <label className="flex items-start gap-3 p-3.5 rounded-2xl border border-red-200 bg-red-50/50 hover:bg-red-50 cursor-pointer select-none">
+                  <input 
+                    type="checkbox" 
+                    checked={acknowledgeMismatch}
+                    onChange={() => setAcknowledgeMismatch(!acknowledgeMismatch)}
+                    className="mt-0.5 rounded border-red-300 text-red-600 focus:ring-red-500 w-4 h-4"
+                  />
+                  <div>
+                    <span className="text-xs font-bold text-red-950">Acknowledge Total Difference</span>
+                    <p className="text-[11px] text-red-700">
+                      I acknowledge the difference of ₹{Math.abs(calculatedGrandTotal - metadata.grand_total).toFixed(2)} between the calculated line items and the invoice total.
+                    </p>
+                  </div>
+                </label>
+              )}
+            </div>
+
+            {/* Buttons */}
+            <div className="flex items-center justify-between pt-4 border-t border-gray-100">
+              <button
+                onClick={() => setStep(3)}
+                className="px-4 py-2 text-xs font-bold text-gray-600 hover:bg-gray-100 rounded-xl transition"
+              >
+                &larr; Back to Side-by-Side Editor
+              </button>
+
+              <button
+                onClick={handleConfirmPurchase}
+                disabled={
+                  isConfirming || 
+                  !(checklist.details && checklist.components && checklist.stock && checklist.total) ||
+                  (totalMismatch && !acknowledgeMismatch) ||
+                  (metadata.is_duplicate && !allowDuplicateCommit)
+                }
+                className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-extrabold text-xs rounded-xl shadow-md transition-all flex items-center gap-2"
+              >
+                {isConfirming ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+                Confirm &amp; Update Inventory Stock
+              </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* STEP 5: Success Summary */}
+      {/* ========================================================================= */}
+      {/* STEP 5: Success Summary Screen */}
+      {/* ========================================================================= */}
       {step === 5 && importSummary && (
-        <div className="max-w-3xl mx-auto bg-white shadow-lg border border-gray-100 rounded-3xl p-8 text-center space-y-6">
-          <div className="w-20 h-20 bg-green-50 text-green-500 rounded-full flex items-center justify-center mx-auto mb-2 animate-bounce">
-            <CheckCircle2 className="w-12 h-12" />
-          </div>
-          <div>
-            <h2 className="text-2xl sm:text-3xl font-black text-gray-900">Purchase Ingested Successfully</h2>
-            <p className="text-xs sm:text-sm text-gray-500 mt-1">D1 database transactions committed atomically. Stocks updated.</p>
+        <div className="max-w-2xl mx-auto bg-white shadow-md border border-gray-200 rounded-3xl p-8 text-center space-y-6">
+          <div className="w-16 h-16 bg-emerald-50 text-emerald-600 rounded-full flex items-center justify-center mx-auto shadow-xs">
+            <CheckCircle2 className="w-10 h-10" />
           </div>
 
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <div className="bg-blue-50/50 p-4 rounded-2xl border border-blue-100">
-              <span className="text-2xl font-black text-blue-600">{importSummary.imported || 0}</span>
-              <p className="text-xs font-bold text-blue-900 uppercase tracking-wide mt-1">Added</p>
+          <div>
+            <h2 className="text-2xl font-extrabold text-gray-900">
+              Purchase Bill Ingested Successfully
+            </h2>
+            <p className="text-xs text-gray-500 mt-1">
+              Invoice #{metadata.invoice_number} saved. Components inventory updated atomically with transaction consistency.
+            </p>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div className="bg-sky-50/60 p-4 rounded-2xl border border-sky-100">
+              <span className="text-2xl font-black text-sky-600">{importSummary.imported || 0}</span>
+              <p className="text-[10px] font-bold text-sky-900 uppercase tracking-wide mt-1">New Items Added</p>
             </div>
-            <div className="bg-purple-50/50 p-4 rounded-2xl border border-purple-100">
+            <div className="bg-purple-50/60 p-4 rounded-2xl border border-purple-100">
               <span className="text-2xl font-black text-purple-600">{importSummary.updated || 0}</span>
-              <p className="text-xs font-bold text-purple-900 uppercase tracking-wide mt-1">Updated</p>
+              <p className="text-[10px] font-bold text-purple-900 uppercase tracking-wide mt-1">Existing Updated</p>
             </div>
-            <div className="bg-green-50/50 p-4 rounded-2xl border border-green-100">
-              <span className="text-2xl font-black text-green-600">{importSummary.stock_units_added || 0}</span>
-              <p className="text-xs font-bold text-green-900 uppercase tracking-wide mt-1">Stock Units</p>
+            <div className="bg-emerald-50/60 p-4 rounded-2xl border border-emerald-100">
+              <span className="text-2xl font-black text-emerald-600">+{importSummary.stock_units_added || 0}</span>
+              <p className="text-[10px] font-bold text-emerald-900 uppercase tracking-wide mt-1">Units Added</p>
             </div>
             <div className="bg-gray-50 p-4 rounded-2xl border border-gray-100">
-              <span className="text-2xl font-black text-gray-600">
-                {importSummary.skipped || 0}
-              </span>
-              <p className="text-xs font-bold text-gray-500 uppercase tracking-wide mt-1">Skipped</p>
+              <span className="text-2xl font-black text-gray-600 font-mono">₹{metadata.grand_total.toFixed(0)}</span>
+              <p className="text-[10px] font-bold text-gray-500 uppercase tracking-wide mt-1">Total Amount</p>
             </div>
           </div>
 
-          <div className="flex flex-col sm:flex-row justify-center gap-4 pt-4">
+          <div className="flex flex-col sm:flex-row justify-center gap-3 pt-4">
             <button 
               onClick={() => navigate(user?.role === 'admin' ? '/admin/inventory' : '/faculty/inventory')} 
-              className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm rounded-2xl shadow-md hover:shadow-lg transition-all scale-100 hover:scale-105 active:scale-95"
+              className="px-5 py-2.5 bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs rounded-xl shadow-xs transition"
             >
-              View Components List
+              View Inventory Catalog
             </button>
             <button 
               onClick={() => navigate(user?.role === 'admin' ? '/admin/purchases' : '/faculty/purchases')} 
-              className="px-6 py-3 bg-gray-100 hover:bg-gray-200 text-gray-800 font-bold text-sm rounded-2xl transition-all scale-100 hover:scale-105 active:scale-95"
+              className="px-5 py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-800 font-bold text-xs rounded-xl transition"
             >
-              View Purchases List
+              View Purchase Orders
             </button>
             <button 
               onClick={resetWizard} 
-              className="px-6 py-3 bg-white border border-gray-200 hover:bg-gray-50 text-gray-700 font-bold text-sm rounded-2xl transition-all scale-100"
+              className="px-5 py-2.5 bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 font-bold text-xs rounded-xl transition"
             >
-              Upload Another Invoice
+              Import Another Bill
             </button>
           </div>
         </div>

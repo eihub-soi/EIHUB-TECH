@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { client as d1Client, isD1Configured } from "../lib/d1_client";
 import { sendBrevoPasswordResetLink } from "../utils/brevoService";
+import { buildApiUrl } from "../utils/api";
 import { toast } from "sonner";
 import {
   Mail,
@@ -40,7 +41,7 @@ export const ForgotPasswordPage: React.FC = () => {
     const normalizedEmail = email;
     setIsLoading(true);
     try {
-      const res = await fetch("/api/auth/reset-link", {
+      const res = await fetch(buildApiUrl("/api/auth/reset-link"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

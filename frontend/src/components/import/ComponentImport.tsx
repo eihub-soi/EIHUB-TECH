@@ -14,7 +14,7 @@ import {
   Database,
   Trash2
 } from 'lucide-react';
-import { apiRequest, getAuthHeaders } from '../../utils/api';
+import { apiRequest, getAuthHeaders, buildApiUrl } from '../../utils/api';
 import { useAuth } from '../../contexts/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
@@ -196,7 +196,7 @@ export const ComponentImport: React.FC = () => {
       const headers = await getAuthHeaders();
       delete headers['Content-Type'];
       
-      const response = await fetch(`/api/imports/components/analyze`, {
+      const response = await fetch(buildApiUrl('/api/imports/components/analyze'), {
         method: 'POST',
         headers,
         body: formData

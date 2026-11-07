@@ -3,6 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import { mockEngine } from "../services/mockEngine";
 import { formatDateOnly } from "../utils/timestamp";
 import { generateStudentReceiptPdf } from "../utils/pdfGenerator";
+import { buildApiUrl } from "../utils/api";
 import { BorrowRequest, RequestStatus } from "../types";
 import {
   CheckCircle2,
@@ -64,8 +65,7 @@ export const VerifyReceipt: React.FC = () => {
         // 2. If not found, try querying public API
         if (!req) {
           try {
-            const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || (import.meta.env.DEV ? "http://localhost:8000" : "");
-            const response = await fetch(`${apiBaseUrl}/api/requests/verify/${encodeURIComponent(requestCode)}`);
+            const response = await fetch(buildApiUrl(`/api/requests/verify/${encodeURIComponent(requestCode)}`));
             if (response.ok) {
               const rawData = await response.json();
               req = {

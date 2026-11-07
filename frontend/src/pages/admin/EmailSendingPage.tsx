@@ -19,7 +19,7 @@ import {
 import { useAuth } from "../../contexts/AuthContext";
 import { mockEngine } from "../../services/mockEngine";
 import { previewReport, sendReportEmail } from "../../services/reportService";
-import { getAuthHeaders } from "../../utils/api";
+import { getAuthHeaders, buildApiUrl } from "../../utils/api";
 import { formatTimestamp } from "../../utils/timestamp";
 
 interface EmailAttachment {
@@ -566,7 +566,7 @@ export const EmailSendingPage: React.FC = () => {
           if (toDateParam) query.append("to_date", toDateParam);
 
           const res = await fetch(
-            `/api/admin/reports/preview-pdf?${query.toString()}`,
+            buildApiUrl(`/api/admin/reports/preview-pdf?${query.toString()}`),
             { headers }
           );
           if (res.ok) {
