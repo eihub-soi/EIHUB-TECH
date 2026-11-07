@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: eihub-backend
+    runtime: docker
+    dockerfilePath: docker/backend.Dockerfile
+    dockerContext: .
+    plan: starter
+    healthCheckPath: /api/health
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: ENVIRONMENT
+        value: production
+      - key: ALLOWED_ORIGINS
+        value: https://testcase-ei.vercel.app
+      # Secrets entered in Render dashboard (never committed to repository)
+      - key: CLOUDFLARE_ACCOUNT_ID
+        sync: false
+      - key: CLOUDFLARE_API_TOKEN
+        sync: false
+      - key: CLOUDFLARE_D1_DATABASE_ID
+        sync: false
+      - key: FIREBASE_CREDENTIALS
+        sync: false
+      - key: JWT_SECRET_KEY
+        sync: false
+      - key: BREVO_API_KEY
+        sync: false
+

@@ -1,0 +1,61 @@
+# ==============================================================================
+# EI HUB DOCKER IGNORE CONFIGURATION
+# Prevents secrets, local databases, build caches, and node_modules from entering Docker images
+# ==============================================================================
+
+# Environment & Secret Files (CRITICAL: Never bake secrets into image)
+.env
+.env.*
+*.env
+*.pem
+*.key
+*service_account*.json
+*service-account*.json
+*credentials*.json
+firebase-service-account*.json
+
+# SQLite databases & Local state
+*.db
+*.sqlite
+*.sqlite3
+test_database.db
+backend/test_database.db
+backups/
+
+# Python Virtual Environments & Bytecode
+.venv/
+backend/.venv/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node.js & Frontend assets (Backend container does not serve frontend code)
+node_modules/
+frontend/
+dist/
+dev-dist/
+
+# Version Control & Tooling metadata
+.git/
+.gitignore
+.github/
+.vscode/
+.agents/
+.wrangler/
+.python-version
+pyrightconfig.json
+
+# Documentation, Tests & Scratch files
+docs/
+scratch/
+test-results/
+*.zip
+*.log
+TODO.md
+walkthrough.md
+*.spec.js
+
