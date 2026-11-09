@@ -938,7 +938,28 @@ def get_preprocessed_images(img: Image.Image) -> Dict[str, Image.Image]:
     versions['version_e'] = img_gray
     versions['raw_grayscale'] = img_gray
     
-    # 2. Standard Enhanced: Grayscale + Autocontrast + Sharpening (Version A)
+    # 2. Scaled High-Resolution (clean 2x Lanczos for fine character glyph discrimination)
+    try:
+        if max(w, h) < 2200:
+            scale_factor = min(2.0, 2400.0 / max(w, h))
+            versions['scaled_2x'] = img_gray.resize((int(w * scale_factor), int(h * scale_factor)), Image.Resampling.LANCZOS)
+        else:
+            versions['scaled_2x'] = img_gray
+    except Exception:
+        versions['scaled_2x'] = img_gray
+
+    # 3. Scaled Denoised (Median noise filter + Lanczos for speckled/noisy scans)
+    try:
+        denoised = img_gray.filter(ImageFilter.MedianFilter(size=3))
+        if max(w, h) < 2200:
+            scale_factor = min(2.0, 2400.0 / max(w, h))
+            versions['scaled_denoised'] = denoised.resize((int(w * scale_factor), int(h * scale_factor)), Image.Resampling.LANCZOS)
+        else:
+            versions['scaled_denoised'] = denoised
+    except Exception:
+        pass
+    
+    # 3. Standard Enhanced: Grayscale + Autocontrast + Sharpening (Version A)
     try:
         auto_c = ImageOps.autocontrast(img_gray, cutoff=1)
         resized_a = auto_c.resize((int(w * 1.5), int(h * 1.5)), Image.Resampling.BILINEAR)
@@ -1163,10 +1184,23 @@ def parse_ocr_coordinates(raw_data: Dict[str, Any]) -> Dict[str, Any]:
             
     parsed_items = []
     
+    SUMMARY_TERMINATION_KEYWORDS = {
+        'subtotal', 'sub-total', 'sub total', 'grand total', 'total amount', 
+        'amount payable', 'net payable', 'net amount', 'total payable',
+        'taxable amount', 'taxable value', 'total tax', 'cgst', 'sgst', 'igst', 
+        'round off', 'round-off', 'amount in words', 'rupees in words'
+    }
+    
     # Process all rows below the header (or all rows if no header is found)
     start_row_idx = header_row_idx + 1 if header_row_idx != -1 else 0
     for r_idx in range(start_row_idx, len(rows)):
         row_words = rows[r_idx]
+        row_text_raw = " ".join([w['text'] for w in row_words])
+        row_text_lower = row_text_raw.lower()
+        
+        # Stop table row parsing once footer/summary totals or tax sections are reached
+        if header_found and any(kw in row_text_lower for kw in SUMMARY_TERMINATION_KEYWORDS):
+            break
         
         row_data = {
             'item_name': [], 'quantity': [], 'unit': [], 'unit_price': [], 'total': [], 'hsn': []
@@ -1200,6 +1234,9 @@ def parse_ocr_coordinates(raw_data: Dict[str, Any]) -> Dict[str, Any]:
                     row_confs[k] = [w['conf'] for w in row_words]
                     
         item_name_str = " ".join(row_data['item_name']).strip()
+        # Clean leading noise characters (like '. ', ': ', '; ', '- ')
+        item_name_str = re.sub(r'^[.\s,:;_\-]+', '', item_name_str).strip()
+        
         qty_str = "".join(row_data['quantity']).strip()
         unit_str = " ".join(row_data['unit']).strip()
         price_str = "".join(row_data['unit_price']).strip()
@@ -1209,8 +1246,31 @@ def parse_ocr_coordinates(raw_data: Dict[str, Any]) -> Dict[str, Any]:
         if not any([item_name_str, qty_str, price_str, total_str]):
             continue
             
+        # An item description in an invoice table must contain at least one alphanumeric character
+        if not re.search(r'[a-zA-Z0-9]', item_name_str):
+            continue
+            
         def clean_numeric(val_str):
-            return re.sub(r'[^\d\.\-]', '', val_str)
+            if not val_str:
+                return ""
+            # Strip leading/trailing noise punctuation
+            v = val_str.strip().strip(".,:;_-~`'\"|")
+            # Fix OCR colon/semicolon in decimal places: e.g. '2320:00' -> '2320.00'
+            v = re.sub(r'[:;](\d{2})\b', r'.\1', v)
+            # Fix comma before 2 decimal digits: e.g. '2320,00' -> '2320.00'
+            if ',' in v and '.' not in v and re.search(r',\d{2}$', v):
+                v = re.sub(r',(\d{2})$', r'.\1', v)
+            # Strip any remaining non-numeric except dot and minus
+            v = re.sub(r'[^\d\.\-]', '', v).strip(".,:;_-")
+            # If multiple dots, find if one has 2 decimal digits at end
+            if v.count('.') > 1:
+                m = re.search(r'^(.*)\.(\d{2})$', v)
+                if m:
+                    v = m.group(1).replace('.', '') + '.' + m.group(2)
+                else:
+                    parts = v.split('.')
+                    v = parts[0] + '.' + ''.join(parts[1:])
+            return v
             
         qty_val = None
         price_val = None
@@ -1242,6 +1302,14 @@ def parse_ocr_coordinates(raw_data: Dict[str, Any]) -> Dict[str, Any]:
         
         calc_row_total = round(qty_val * price_val, 2) if (qty_val is not None and price_val is not None) else None
         
+        # If total_val is missing or 0, but qty and price are present
+        row_effective_total = total_val if (total_val is not None and total_val > 0) else (calc_row_total if calc_row_total is not None else 0.0)
+        
+        # If price_val is missing or 0, but total and qty are present
+        if (price_val is None or price_val == 0.0) and (total_val is not None and total_val > 0) and (qty_val is not None and qty_val > 0):
+            price_val = round(total_val / qty_val, 2)
+            calc_row_total = total_val
+        
         field_confs = {
             'item_name': sum(row_confs['item_name']) / len(row_confs['item_name']) if row_confs['item_name'] else 0.0,
             'quantity': sum(row_confs['quantity']) / len(row_confs['quantity']) if row_confs['quantity'] else 0.0,
@@ -1258,7 +1326,7 @@ def parse_ocr_coordinates(raw_data: Dict[str, Any]) -> Dict[str, Any]:
             'unit': unit_str or 'pcs',
             'unit_price': price_val if price_val is not None else 0.0,
             'raw_unit_price': price_val,
-            'total': total_val if total_val is not None else (calc_row_total if calc_row_total is not None else 0.0),
+            'total': row_effective_total,
             'raw_total': total_val,
             'calculated_total': calc_row_total,
             'hsn': hsn_str,
@@ -1605,6 +1673,8 @@ def perform_ocr_sync(content: bytes, is_pdf: bool) -> Dict[str, Any]:
     
     # Candidate preprocessing strategies to compare
     candidates = [
+        ('scaled_2x', '--psm 6'),
+        ('scaled_denoised', '--psm 6'),
         ('standard_enhanced', '--psm 6'),
         ('adaptive_thresh', '--psm 6'),
         ('otsu_filtered', '--psm 6'),
@@ -1612,7 +1682,7 @@ def perform_ocr_sync(content: bytes, is_pdf: bool) -> Dict[str, Any]:
         ('raw_grayscale', '--psm 6'),
     ]
     
-    best_ver = 'standard_enhanced'
+    best_ver = 'scaled_2x' if 'scaled_2x' in p1_versions else 'standard_enhanced'
     if best_ver not in p1_versions:
         best_ver = 'raw_grayscale'
     best_config = '--psm 6'
@@ -1626,6 +1696,10 @@ def perform_ocr_sync(content: bytes, is_pdf: bool) -> Dict[str, Any]:
             parsed = parse_ocr_coordinates(raw_data)
             candidate_text = "\n".join(parsed.get('all_row_texts', []))
             score = score_ocr_result(parsed, raw_text=candidate_text)
+            if ver_name == 'scaled_2x':
+                score += 6.0
+            elif ver_name == 'scaled_denoised':
+                score += 3.0
             if score > best_score:
                 best_score = score
                 best_ver = ver_name
@@ -1740,20 +1814,32 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
     
     # Metadata Regex Extraction rules
     gstin_pattern = re.compile(r"\b([0-9]{2}[\s\-]?[A-Z]{5}[\s\-]?[0-9]{4}[\s\-]?[A-Z]{1}[\s\-]?[1-9A-Z]{1}[\s\-]?[Z2][\s\-]?[0-9A-Z]{1})\b")
-    invoice_pattern = re.compile(r"(?i)\b(?:invoice|bill|inv)\b(?:\s*(?:no\.?|number|#|nox))?[\t :.\-]+[\t ]*([a-zA-Z0-9\-\/]+)")
-    date_pattern = re.compile(r"(?i)(?:date|dt)[\t ]*[:.]?[\t ]*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})")
-    due_date_pattern = re.compile(r"(?i)(?:due\s*date|due\s*dt|payment\s*due)[\t ]*[:.]?[\t ]*(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})")
+    labeled_inv_pattern = re.compile(r"(?i)\b(?:invoice|bill|inv)\b[\s.:\-_]*(?:no\.?|num\.?|number|#|ref|code)[\t :.\-]+[\t ]*([a-zA-Z0-9\-\/]{2,})")
+    fallback_inv_pattern = re.compile(r"(?i)(?:invoice|bill|inv)[\s\w.:#-]*?([A-Z0-9]{2,}[-][A-Z0-9\-_/]+)")
+    secondary_inv_pattern = re.compile(r"(?i)\b(?:invoice|bill|inv)\b[\t :.\-]+[\t ]*([a-zA-Z0-9\-\/]{2,})")
+    date_pattern = re.compile(r"(?i)(?:date|dt)[\t ]*[:.]?[\t ]*(\d{4}[-\/\.]\d{1,2}[-\/\.]\d{1,2}|\d{1,2}[-\/\.]\d{1,2}[-\/\.]\d{2,4})")
+    due_date_pattern = re.compile(r"(?i)(?:due\s*date|due\s*dt|payment\s*due)[\t ]*[:.]?[\t ]*(\d{4}[-\/\.]\d{1,2}[-\/\.]\d{1,2}|\d{1,2}[-\/\.]\d{1,2}[-\/\.]\d{2,4})")
     po_pattern = re.compile(r"(?i)\b(?:p\.?o\.?|purchase\s*order)\b(?:\s*(?:no|number|#))?[\t ]*[:.]?[\t ]*([a-zA-Z0-9\-\/]+)")
-    total_pattern = re.compile(r"(?i)(?:grand\s*total|total\s*amount|amount\s*payable|net\s*payable)[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
-    subtotal_pattern = re.compile(r"(?i)(?:subtotal|sub-total|total\s*before\s*tax)[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
-    taxable_pattern = re.compile(r"(?i)(?:taxable\s*amount|taxable\s*value|taxable\s*val)[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
-    gst_tax_pattern = re.compile(r"(?i)(?:\btotal\s*tax\b|\bgst\s*tax\b|\b(?<![csi])gst\b|\btax\s*amount\b)[\t ]*(?:(?:@|at)?[\t ]*\d+(?:\.\d+)?%?)?[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
-    cgst_pattern = re.compile(r"(?i)(?:cgst|central\s*tax|central\s*gst)[\t ]*(?:(?:@|at)?[\t ]*\d+(?:\.\d+)?%?)?[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
-    sgst_pattern = re.compile(r"(?i)(?:sgst|state\s*tax|state\s*gst|utgst)[\t ]*(?:(?:@|at)?[\t ]*\d+(?:\.\d+)?%?)?[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
-    igst_pattern = re.compile(r"(?i)(?:igst|integrated\s*tax|integrated\s*gst)[\t ]*(?:(?:@|at)?[\t ]*\d+(?:\.\d+)?%?)?[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
-    discount_pattern = re.compile(r"(?i)(?:discount|disc)[\t ]*[:.]?[\t ]*([0-9,]+\.[0-9]{2})")
-    round_off_pattern = re.compile(r"(?i)(?:round\s*off|roundoff)[\t ]*[:.]?[\t ]*([+-]?[0-9,]+\.[0-9]{2})")
+    total_pattern = re.compile(r"(?i)(?:grand\s*total|total\s*amount|amount\s*payable|net\s*payable)[\t ]*[:.]?[\t ]*([0-9,]+(?:[.\s:,][0-9]{2})?)")
+    subtotal_pattern = re.compile(r"(?i)(?:subtotal|sub-total|total\s*before\s*tax)[\t ]*[:.]?[\t ]*([0-9,]+(?:[.\s:,][0-9]{2})?)")
+    taxable_pattern = re.compile(r"(?i)(?:taxable\s*amount|taxable\s*value|taxable\s*val)[\t ]*[:.]?[\t ]*([0-9,]+(?:[.\s:,][0-9]{2})?)")
+    gst_tax_pattern = re.compile(r"(?i)(?:\btotal\s*tax\b|\bgst\s*tax\b|\b(?<![csi])gst\b|\btax\s*amount\b)[\t ]*(?:(?:@|at)?[\t ]*\d+(?:\.\d+)?%?)?[\t ]*[:.]?[\t ]*([0-9,]+(?:[.\s:,][0-9]{2})?)")
+    cgst_pattern = re.compile(r"(?i)(?:cgst|central\s*tax|central\s*gst)[\t ]*(?:(?:@|at)?[\t ]*\d+(?:\.\d+)?%?)?[\t ]*[:.]?[\t ]*([0-9,]+(?:[.\s:,][0-9]{2})?)")
+    sgst_pattern = re.compile(r"(?i)(?:sgst|state\s*tax|state\s*gst|utgst)[\t ]*(?:(?:@|at)?[\t ]*\d+(?:\.\d+)?%?)?[\t ]*[:.]?[\t ]*([0-9,]+(?:[.\s:,][0-9]{2})?)")
+    igst_pattern = re.compile(r"(?i)(?:igst|integrated\s*tax|integrated\s*gst)[\t ]*(?:(?:@|at)?[\t ]*\d+(?:\.\d+)?%?)?[\t ]*[:.]?[\t ]*([0-9,]+(?:[.\s:,][0-9]{2})?)")
+    discount_pattern = re.compile(r"(?i)(?:discount|disc)[\t ]*[:.]?[\t ]*([0-9,]+(?:[.\s:,][0-9]{2})?)")
+    round_off_pattern = re.compile(r"(?i)(?:round\s*off|roundoff)[\t ]*[:.]?[\t ]*([+-]?[0-9,]+(?:[.\s:,][0-9]{2})?)")
     
+    def parse_currency_amount(raw_s: Optional[str]) -> Optional[float]:
+        if not raw_s:
+            return None
+        cleaned = re.sub(r'[\s:,](\d{2})$', r'.\1', raw_s.strip())
+        cleaned = re.sub(r'[^\d\.\-]', '', cleaned)
+        try:
+            return float(cleaned)
+        except ValueError:
+            return None
+
     gst_match = gstin_pattern.search(raw_text)
     raw_gst_match = gst_match.group(0) if gst_match else ""
     supplier_gst = normalize_gstin_ocr(gst_match.group(1)) if gst_match else None
@@ -1768,16 +1854,22 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
             if len(cleaned) == 15:
                 supplier_gst = normalize_gstin_ocr(cleaned)
     
-    inv_match = invoice_pattern.search(raw_text)
-    raw_inv_match = inv_match.group(0) if inv_match else ""
-    invoice_number = inv_match.group(1).strip() if inv_match else None
-    if invoice_number and invoice_number.lower() in ['no', 'number', 'x', '', 'date', 'tax', 'original', 'invoice']:
-        fallback_inv = re.search(r"(?i)(?:invoice|bill|inv)[\s\w.:#-]*?([A-Z0-9]{2,}[-][A-Z0-9\-_/]+)", raw_text)
-        if fallback_inv:
-            raw_inv_match = fallback_inv.group(0)
-            invoice_number = fallback_inv.group(1).strip()
-        else:
-            invoice_number = None
+    invoice_number = None
+    raw_inv_match = ""
+    m_inv = labeled_inv_pattern.search(raw_text)
+    if m_inv and m_inv.group(1).lower() not in ['tax', 'date', 'gst', 'memo', 'bill', 'invoice', 'no', 'number', 'original']:
+        raw_inv_match = m_inv.group(0)
+        invoice_number = m_inv.group(1).strip()
+    if not invoice_number:
+        m_fallback = fallback_inv_pattern.search(raw_text)
+        if m_fallback:
+            raw_inv_match = m_fallback.group(0)
+            invoice_number = m_fallback.group(1).strip()
+    if not invoice_number:
+        m_sec = secondary_inv_pattern.search(raw_text)
+        if m_sec and m_sec.group(1).lower() not in ['tax', 'date', 'gst', 'memo', 'bill', 'invoice', 'no', 'number', 'original']:
+            raw_inv_match = m_sec.group(0)
+            invoice_number = m_sec.group(1).strip()
     
     dt_match = date_pattern.search(raw_text)
     raw_date_match = dt_match.group(0) if dt_match else ""
@@ -1793,32 +1885,32 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
     
     tot_match = total_pattern.search(raw_text)
     raw_tot_match = tot_match.group(0) if tot_match else ""
-    printed_grand_total = float(tot_match.group(1).replace(",", "")) if tot_match else None
+    printed_grand_total = parse_currency_amount(tot_match.group(1)) if tot_match else None
     
     sub_match = subtotal_pattern.search(raw_text)
     raw_sub_match = sub_match.group(0) if sub_match else ""
-    printed_subtotal = float(sub_match.group(1).replace(",", "")) if sub_match else None
+    printed_subtotal = parse_currency_amount(sub_match.group(1)) if sub_match else None
     
     taxable_match = taxable_pattern.search(raw_text)
-    taxable_amount = float(taxable_match.group(1).replace(",", "")) if taxable_match else None
+    taxable_amount = parse_currency_amount(taxable_match.group(1)) if taxable_match else None
     
     tax_match = gst_tax_pattern.search(raw_text)
-    gst_tax = float(tax_match.group(1).replace(",", "")) if tax_match else None
+    gst_tax = parse_currency_amount(tax_match.group(1)) if tax_match else None
     
     cgst_match = cgst_pattern.search(raw_text)
-    cgst = float(cgst_match.group(1).replace(",", "")) if cgst_match else None
+    cgst = parse_currency_amount(cgst_match.group(1)) if cgst_match else None
     
     sgst_match = sgst_pattern.search(raw_text)
-    sgst = float(sgst_match.group(1).replace(",", "")) if sgst_match else None
+    sgst = parse_currency_amount(sgst_match.group(1)) if sgst_match else None
     
     igst_match = igst_pattern.search(raw_text)
-    igst = float(igst_match.group(1).replace(",", "")) if igst_match else None
+    igst = parse_currency_amount(igst_match.group(1)) if igst_match else None
     
     disc_match = discount_pattern.search(raw_text)
-    discount = float(disc_match.group(1).replace(",", "")) if disc_match else 0.0
+    discount = parse_currency_amount(disc_match.group(1)) if disc_match else 0.0
     
     round_match = round_off_pattern.search(raw_text)
-    round_off = float(round_match.group(1).replace(",", "")) if round_match else 0.0
+    round_off = parse_currency_amount(round_match.group(1)) if round_match else 0.0
     
     # Financial reconciliation adjustments without guessing
     if cgst is not None or sgst is not None or igst is not None:
@@ -1984,13 +2076,25 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
     for idx, r in enumerate(final_raw_rows):
         name = r['item_name']
         orig_name = r.get('original_item_name') or name
+        row_full_text = r.get('original_row_text', '')
+        
+        # Clean leading noise characters (like '. ', ': ', '; ', '- ')
+        name = re.sub(r'^[.\s,:;_\-]+', '', name).strip()
+        orig_name = re.sub(r'^[.\s,:;_\-]+', '', orig_name).strip()
+        
+        # Skip pure noise rows without any alphanumeric description
+        if not re.search(r'[a-zA-Z0-9]', name):
+            continue
         
         # Skip total summary lines in actual component arrays
-        if any(k in name.lower() for k in ["subtotal", "sub-total", "grand total", "total amount", "amount payable", "net payable"]):
+        if any(k in name.lower() or k in row_full_text.lower() for k in [
+            "subtotal", "sub-total", "grand total", "total amount", "amount payable", 
+            "net payable", "cgst", "sgst", "igst", "round off", "round-off"
+        ]):
             # Use total summary to verify metadata if not yet found
-            if printed_grand_total is None and any(k in name.lower() for k in ["grand total", "amount payable", "net payable"]):
+            if printed_grand_total is None and any(k in name.lower() or k in row_full_text.lower() for k in ["grand total", "amount payable", "net payable"]):
                 printed_grand_total = r['total']
-            if printed_subtotal is None and "sub" in name.lower():
+            if printed_subtotal is None and "sub" in (name.lower() + row_full_text.lower()):
                 printed_subtotal = r['total']
             continue
             
