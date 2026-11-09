@@ -1706,6 +1706,7 @@ def perform_ocr_sync(content: bytes, is_pdf: bool) -> Dict[str, Any]:
         best_ver = 'raw_grayscale'
     best_config = '--psm 6'
     best_score = -1.0
+    best_parsed_p1 = None
     
     for ver_name, config in candidates:
         if ver_name not in p1_versions:
@@ -1723,6 +1724,10 @@ def perform_ocr_sync(content: bytes, is_pdf: bool) -> Dict[str, Any]:
                 best_score = score
                 best_ver = ver_name
                 best_config = config
+                best_parsed_p1 = parsed
+            # High-confidence early exit: if candidate already captured invoice structure, skip further trials
+            if score >= 350.0:
+                break
         except Exception as e:
             print(f"[OCR Trial] Pass {ver_name} {config} failed: {e}")
             
@@ -1730,6 +1735,10 @@ def perform_ocr_sync(content: bytes, is_pdf: bool) -> Dict[str, Any]:
     
     # Process all pages with the chosen best configuration parameters
     for idx, page in enumerate(pages):
+        if idx == 0 and best_parsed_p1 is not None:
+            all_pages_rows.extend(best_parsed_p1.get('raw_rows', []))
+            all_raw_texts.extend(best_parsed_p1.get('all_row_texts', []))
+            continue
         page_versions = get_preprocessed_images(page)
         img_to_use = page_versions.get(best_ver, page_versions.get('version_a', page))
         try:
