@@ -1,13 +1,20 @@
+import os
+import sys
+
+# Ensure backend directory is in sys.path for direct imports and language servers
+_backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
+if _backend_dir not in sys.path:
+    sys.path.insert(0, _backend_dir)
+
 from fastapi import APIRouter, HTTPException, Depends, File, UploadFile
 from typing import List, Dict, Any, Optional, Tuple
 from pydantic import BaseModel
 import asyncio
 import io
 import csv
-import sys
 
 # We will assume db_query, db_batch are available in main app or db module
-from app.main import db_query, db_batch, get_current_user, require_admin, require_faculty_or_admin, log_activity
+from app.main import db_query, db_batch, require_admin, require_faculty_or_admin, log_activity
 
 router = APIRouter(prefix="/api/imports", tags=["Imports"])
 
@@ -938,10 +945,16 @@ def get_preprocessed_images(img: Image.Image) -> Dict[str, Image.Image]:
     versions['version_e'] = img_gray
     versions['raw_grayscale'] = img_gray
     
-    # 2. Scaled High-Resolution (clean 2x Lanczos for fine character glyph discrimination)
+    # 2. Scaled High-Resolution (clean Lanczos for fine character glyph discrimination)
     try:
-        if max(w, h) < 2200:
-            scale_factor = min(2.0, 2400.0 / max(w, h))
+        max_dim = max(w, h)
+        if max_dim < 1600:
+            scale_factor = 1.5
+        elif max_dim <= 2400:
+            scale_factor = 1.25
+        else:
+            scale_factor = 1.0
+        if scale_factor > 1.05:
             versions['scaled_2x'] = img_gray.resize((int(w * scale_factor), int(h * scale_factor)), Image.Resampling.LANCZOS)
         else:
             versions['scaled_2x'] = img_gray
@@ -951,15 +964,21 @@ def get_preprocessed_images(img: Image.Image) -> Dict[str, Image.Image]:
     # 3. Scaled Denoised (Median noise filter + Lanczos for speckled/noisy scans)
     try:
         denoised = img_gray.filter(ImageFilter.MedianFilter(size=3))
-        if max(w, h) < 2200:
-            scale_factor = min(2.0, 2400.0 / max(w, h))
+        max_dim = max(w, h)
+        if max_dim < 1600:
+            scale_factor = 1.5
+        elif max_dim <= 2400:
+            scale_factor = 1.25
+        else:
+            scale_factor = 1.0
+        if scale_factor > 1.05:
             versions['scaled_denoised'] = denoised.resize((int(w * scale_factor), int(h * scale_factor)), Image.Resampling.LANCZOS)
         else:
             versions['scaled_denoised'] = denoised
     except Exception:
         pass
     
-    # 3. Standard Enhanced: Grayscale + Autocontrast + Sharpening (Version A)
+    # 4. Standard Enhanced: Grayscale + Autocontrast + Sharpening (Version A)
     try:
         auto_c = ImageOps.autocontrast(img_gray, cutoff=1)
         resized_a = auto_c.resize((int(w * 1.5), int(h * 1.5)), Image.Resampling.BILINEAR)
@@ -969,7 +988,7 @@ def get_preprocessed_images(img: Image.Image) -> Dict[str, Image.Image]:
         versions['version_a'] = img_gray.resize((w * 2, h * 2), Image.Resampling.LANCZOS)
         versions['standard_enhanced'] = versions['version_a']
         
-    # 3. High Contrast: Grayscale + 1.6x contrast + sharpen (Version B)
+    # 5. High Contrast: Grayscale + 1.6x contrast + sharpen (Version B)
     try:
         enhanced = ImageEnhance.Contrast(img_gray).enhance(1.6)
         versions['version_b'] = enhanced.filter(ImageFilter.SHARPEN)
@@ -978,10 +997,10 @@ def get_preprocessed_images(img: Image.Image) -> Dict[str, Image.Image]:
         versions['version_b'] = img_gray
         versions['high_contrast'] = img_gray
         
-    # 4. Sharpened only (Version D)
+    # 6. Sharpened only (Version D)
     versions['version_d'] = img_gray.filter(ImageFilter.SHARPEN)
     
-    # 5. Otsu Global Binarization with 3x3 Median Noise Filter (Version C)
+    # 7. Otsu Global Binarization with 3x3 Median Noise Filter (Version C)
     try:
         denoised = img_gray.filter(ImageFilter.MedianFilter(size=3))
         work_img = denoised.resize((int(w * 1.5), int(h * 1.5)), Image.Resampling.BILINEAR) if w < 2000 else denoised
@@ -1020,7 +1039,7 @@ def get_preprocessed_images(img: Image.Image) -> Dict[str, Image.Image]:
         except Exception:
             pass
             
-    # 6. Adaptive Local Neighborhood Thresholding (Handles shadows and gradient illumination)
+    # 8. Adaptive Local Neighborhood Thresholding (Handles shadows and gradient illumination)
     try:
         work_img = img_gray.resize((int(w * 1.5), int(h * 1.5)), Image.Resampling.BILINEAR) if w < 2000 else img_gray
         blurred = work_img.filter(ImageFilter.BoxBlur(15))
