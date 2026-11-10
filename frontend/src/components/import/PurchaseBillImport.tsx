@@ -220,6 +220,22 @@ const isInvoiceSummaryRow = (name: string): boolean => {
   return summaryPatterns.some(p => p.test(n));
 };
 
+export const STANDARD_CATEGORIES: string[] = [
+  'Active Components',
+  'Displays',
+  'Microcontrollers',
+  'Modules',
+  'Motors',
+  'Optoelectronics',
+  'Others',
+  'Passives',
+  'Power Supplies',
+  'Prototyping & Tools',
+  'Relay Modules',
+  'Sensors',
+  'Single Board Computers',
+];
+
 export const PurchaseBillImport: React.FC = () => {
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -315,6 +331,29 @@ export const PurchaseBillImport: React.FC = () => {
   });
 
   const [importSummary, setImportSummary] = useState<any>(null);
+  const [availableCategories, setAvailableCategories] = useState<string[]>(STANDARD_CATEGORIES);
+
+  useEffect(() => {
+    let isMounted = true;
+    const fetchDbCategories = async () => {
+      try {
+        const data = await apiRequest('/api/components');
+        if (isMounted && Array.isArray(data)) {
+          const dbCats = data
+            .map((c: any) => c.category)
+            .filter((cat: any) => typeof cat === 'string' && cat.trim() && cat !== 'Select Category');
+          const merged = Array.from(new Set([...STANDARD_CATEGORIES, ...dbCats])).sort();
+          setAvailableCategories(merged);
+        }
+      } catch {
+        // Fallback to STANDARD_CATEGORIES if fetch fails
+      }
+    };
+    fetchDbCategories();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
@@ -582,6 +621,23 @@ export const PurchaseBillImport: React.FC = () => {
       const lineAmt = roundHalfUp(q * rate, 2);
       const discAmt = roundHalfUp(lineAmt * (disc / 100), 2);
       row.total = roundHalfUp(lineAmt - discAmt, 2);
+    } else if (field === 'category') {
+      const valStr = String(value || '').trim();
+      row.category = valStr;
+      if (valStr && valStr !== 'Select Category') {
+        row.errors = (row.errors || []).filter(e => !e.toLowerCase().includes('category'));
+        row.warnings = (row.warnings || []).filter(w => !w.toLowerCase().includes('category'));
+        if (row.status === '⚠ NEEDS EDIT' && row.errors.length === 0) {
+          row.status = row.is_existing ? '✓ VERIFIED EXISTING' : '✓ VERIFIED NEW';
+        }
+      } else {
+        if (!row.errors.includes('Required category selection')) {
+          row.errors = [...(row.errors || []), 'Required category selection'];
+        }
+        if (row.status !== '⚠ POSSIBLE MATCH' && row.status !== '⚠ LOW OCR CONFIDENCE') {
+          row.status = '⚠ NEEDS EDIT';
+        }
+      }
     } else {
       (row as any)[field] = value;
     }
@@ -596,7 +652,7 @@ export const PurchaseBillImport: React.FC = () => {
       item_name: '',
       hsn_code: '',
       part_number: '',
-      category: 'Electronics',
+      category: 'Select Category',
       description: 'Manually added purchase bill item',
       quantity: 1,
       unit: 'pcs',
@@ -605,9 +661,9 @@ export const PurchaseBillImport: React.FC = () => {
       tax_rate: 18,
       total: 0,
       confidence_score: 100,
-      errors: [],
+      errors: ['Required category selection'],
       warnings: [],
-      status: '✓ VERIFIED NEW',
+      status: '⚠ NEEDS EDIT',
       is_new: true,
       is_existing: false,
       existing_id: null,
@@ -651,6 +707,15 @@ export const PurchaseBillImport: React.FC = () => {
   };
 
   const handleConfirmPurchase = async () => {
+    const selectedItems = lineItems.filter(r => r.selected);
+    const missingCatItem = selectedItems.find(
+      r => !r.category || !r.category.trim() || r.category === 'Select Category'
+    );
+    if (missingCatItem) {
+      toast.error(`Category selection required for component '${missingCatItem.item_name || 'Item'}'. Please select a category before confirming.`);
+      return;
+    }
+
     setIsConfirming(true);
     try {
       const response = await apiRequest(`/api/imports/purchase/confirm`, {
@@ -674,7 +739,7 @@ export const PurchaseBillImport: React.FC = () => {
             allow_duplicate: allowDuplicateCommit,
             duplicates_merged: lineItems.filter(r => r.warnings.some(w => w.includes("Merged"))).length
           },
-          line_items: lineItems.filter(r => r.selected)
+          line_items: selectedItems
         })
       });
 
@@ -857,6 +922,9 @@ export const PurchaseBillImport: React.FC = () => {
       const rowNum = idx + 1;
       if (!r.item_name || !r.item_name.trim()) {
         errs.push(`Row #${rowNum}: Component name is required.`);
+      }
+      if (!r.category || !r.category.trim() || r.category === 'Select Category') {
+        errs.push(`Row #${rowNum} (${r.item_name || 'Item'}): Category selection is required.`);
       }
       if (r.quantity <= 0) {
         errs.push(`Row #${rowNum} (${r.item_name || 'Item'}): Quantity must be > 0.`);
@@ -1577,6 +1645,7 @@ export const PurchaseBillImport: React.FC = () => {
                       </th>
                       <th className="px-2 py-2.5 text-center w-12 text-gray-500 font-bold">S.No.</th>
                       <th className="px-3 py-2.5 text-left min-w-[280px]">Item Name &amp; Description</th>
+                      <th className="px-2 py-2.5 text-left min-w-[140px] w-36">Category</th>
                       <th className="px-2 py-2.5 text-center w-24">HSN</th>
                       <th className="px-2 py-2.5 text-right w-20">Qty</th>
                       <th className="px-2 py-2.5 text-center w-20">Unit</th>
@@ -1628,6 +1697,35 @@ export const PurchaseBillImport: React.FC = () => {
                             {item.warnings && item.warnings.length > 0 && (
                               <p className="text-[10px] text-amber-600 font-medium px-2 mt-0.5 whitespace-normal break-words">
                                 {item.warnings.join(", ")}
+                              </p>
+                            )}
+                          </td>
+
+                          {/* Category Selection Dropdown */}
+                          <td className="px-2 py-2 min-w-[140px] w-36">
+                            <select
+                              value={item.category || 'Select Category'}
+                              onChange={e => handleCellEdit(actualIdx, 'category', e.target.value)}
+                              className={`w-full px-1.5 py-1 rounded-lg border text-xs font-medium transition-colors ${
+                                !item.category || item.category === 'Select Category'
+                                  ? 'border-amber-400 bg-amber-50/80 text-amber-900 font-bold focus:border-amber-500 focus:ring-1 focus:ring-amber-500'
+                                  : 'border-transparent hover:border-gray-200 focus:border-sky-500 bg-transparent focus:bg-white text-gray-900'
+                              }`}
+                              title={item.category === 'Select Category' ? 'Category selection required' : item.category}
+                            >
+                              <option value="Select Category" disabled>
+                                -- Select Category --
+                              </option>
+                              {availableCategories.map(cat => (
+                                <option key={cat} value={cat}>
+                                  {cat}
+                                </option>
+                              ))}
+                            </select>
+                            {(!item.category || item.category === 'Select Category') && (
+                              <p className="text-[10px] text-amber-600 font-semibold px-1 mt-0.5 whitespace-nowrap flex items-center gap-0.5">
+                                <AlertTriangle className="w-2.5 h-2.5 shrink-0" />
+                                <span>Required</span>
                               </p>
                             )}
                           </td>
@@ -1776,7 +1874,7 @@ export const PurchaseBillImport: React.FC = () => {
 
                     {filteredLineItems.length === 0 && (
                       <tr>
-                        <td colSpan={11} className="px-4 py-8 text-center text-xs text-gray-400">
+                        <td colSpan={12} className="px-4 py-8 text-center text-xs text-gray-400">
                           {lineItems.length === 0 ? "No line items extracted. Click '+ Add Item' above." : "No matching items found for search query."}
                         </td>
                       </tr>
@@ -2242,6 +2340,18 @@ export const PurchaseBillImport: React.FC = () => {
                   </div>
                 </label>
               )}
+
+              {lineItems.some(r => r.selected && (!r.category || !r.category.trim() || r.category === 'Select Category')) && (
+                <div className="p-3.5 rounded-2xl border border-amber-300 bg-amber-50/70 flex items-start gap-2.5">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 shrink-0" />
+                  <div>
+                    <span className="text-xs font-bold text-amber-950">Category Assignment Required</span>
+                    <p className="text-[11px] text-amber-800">
+                      One or more selected components require a category selection before confirmation. Please click &quot;Back to Side-by-Side Editor&quot; to assign categories.
+                    </p>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Buttons */}
@@ -2259,7 +2369,8 @@ export const PurchaseBillImport: React.FC = () => {
                   isConfirming ||
                   !(checklist.details && checklist.components && checklist.stock && checklist.total) ||
                   (totalMismatch && !acknowledgeMismatch) ||
-                  (metadata.is_duplicate && !allowDuplicateCommit)
+                  (metadata.is_duplicate && !allowDuplicateCommit) ||
+                  lineItems.some(r => r.selected && (!r.category || !r.category.trim() || r.category === 'Select Category'))
                 }
                 className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-extrabold text-xs rounded-xl shadow-md transition-all flex items-center gap-2"
               >

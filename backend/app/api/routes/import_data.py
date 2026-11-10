@@ -1563,7 +1563,12 @@ KNOWN_CATEGORY_MAPPINGS = {
     'transistor': 'Active Components',
     'diode': 'Active Components',
     'servo': 'Motors',
-    'motor': 'Motors'
+    'motor': 'Motors',
+    'adapter': 'Power Supplies',
+    'power supply': 'Power Supplies',
+    'smps': 'Power Supplies',
+    'charger': 'Power Supplies',
+    'battery': 'Power Supplies'
 }
 
 def determine_category(name: str, invoice_cat: Optional[str] = None, existing_cat: Optional[str] = None) -> str:
@@ -2697,6 +2702,8 @@ async def confirm_purchase(req: PurchaseConfirmRequest, user=Depends(require_adm
             comp_id = matched_db_comp["id"]
             new_tot = matched_db_comp["total_stock"] + qty
             new_avail = matched_db_comp["available_stock"] + qty
+            if (not category or category in ["Electronics", "Select Category"]) and matched_db_comp.get("category"):
+                category = matched_db_comp["category"]
 
             queries.append(
                 """UPDATE components SET

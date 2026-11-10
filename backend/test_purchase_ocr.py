@@ -539,5 +539,113 @@ class TestPurchaseOCR(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("summary row", response.json()["detail"].lower())
 
+    @patch("app.api.routes.import_data.db_query")
+    def test_confirm_rejects_missing_or_select_category(self, mock_db_query):
+        """Verify confirm_purchase rejects line items with 'Select Category' or empty category."""
+        mock_db_query.return_value = []
+
+        # 1. 'Select Category' rejection
+        payload1 = {
+            "metadata": {
+                "supplier_name": "Power Grid Inc",
+                "invoice_number": "INV-PG-001",
+                "grand_total": 450.0
+            },
+            "line_items": [
+                {
+                    "item_name": "12V - 2AMP - ADAPTER",
+                    "quantity": 1,
+                    "unit_price": 450.0,
+                    "category": "Select Category"
+                }
+            ]
+        }
+        res1 = self.client.post("/api/imports/purchase/confirm", json=payload1)
+        self.assertEqual(res1.status_code, 400)
+        self.assertIn("Category selection required for component '12V - 2AMP - ADAPTER'", res1.json()["detail"])
+
+        # 2. Empty category rejection
+        payload2 = {
+            "metadata": {
+                "supplier_name": "Power Grid Inc",
+                "invoice_number": "INV-PG-002",
+                "grand_total": 450.0
+            },
+            "line_items": [
+                {
+                    "item_name": "12V - 2AMP - ADAPTER",
+                    "quantity": 1,
+                    "unit_price": 450.0,
+                    "category": ""
+                }
+            ]
+        }
+        res2 = self.client.post("/api/imports/purchase/confirm", json=payload2)
+        self.assertEqual(res2.status_code, 400)
+        self.assertIn("Category selection required for component '12V - 2AMP - ADAPTER'", res2.json()["detail"])
+
+    @patch("app.api.routes.import_data.db_query")
+    @patch("app.api.routes.import_data.db_batch")
+    @patch("app.api.routes.import_data.log_activity")
+    def test_confirm_accepts_valid_category_and_persists(self, mock_log, mock_batch, mock_db_query):
+        """Verify confirm_purchase accepts valid assigned category and persists to DB."""
+        mock_db_query.return_value = []
+        payload = {
+            "metadata": {
+                "supplier_name": "Power Electronics Ltd",
+                "invoice_number": "INV-PWR-2026",
+                "grand_total": 900.0,
+                "po_number": "PO-PWR-01"
+            },
+            "line_items": [
+                {
+                    "item_name": "12V - 2AMP - ADAPTER",
+                    "quantity": 2,
+                    "unit_price": 450.0,
+                    "category": "Power Supplies"
+                }
+            ]
+        }
+        response = self.client.post("/api/imports/purchase/confirm", json=payload)
+        self.assertEqual(response.status_code, 200)
+        res = response.json()
+        self.assertTrue(res["success"])
+        self.assertEqual(res["metrics"]["imported"], 1)
+
+        # Verify SQL statements created
+        self.assertTrue(mock_batch.called)
+        statements = mock_batch.call_args[0][0]
+
+        # Verify component insert had category 'Power Supplies'
+        comp_inserts = [s for s in statements if "INSERT INTO components" in s.sql]
+        self.assertEqual(len(comp_inserts), 1)
+        self.assertEqual(comp_inserts[0].args[1], "12V - 2AMP - ADAPTER") # name
+        self.assertEqual(comp_inserts[0].args[2], "Power Supplies")        # category
+
+        # Verify purchase_orders insert had component_category 'Power Supplies'
+        po_inserts = [s for s in statements if "INSERT INTO purchase_orders" in s.sql]
+        self.assertEqual(len(po_inserts), 1)
+        self.assertEqual(po_inserts[0].args[4], "12V - 2AMP - ADAPTER")    # component_name
+        self.assertEqual(po_inserts[0].args[5], "Power Supplies")         # component_category
+
+    def test_determine_category_keyword_mappings(self):
+        """Verify determine_category correctly recognizes adapter, charger, and power keywords."""
+        from app.api.routes.import_data import determine_category
+
+        self.assertEqual(determine_category("12V - 2AMP - ADAPTER"), "Power Supplies")
+        self.assertEqual(determine_category("24V 5A Power Supply Unit"), "Power Supplies")
+        self.assertEqual(determine_category("SMPS 12V 10A"), "Power Supplies")
+        self.assertEqual(determine_category("Li-ion Battery 3.7V"), "Power Supplies")
+        self.assertEqual(determine_category("Fast Battery Charger"), "Power Supplies")
+
+        # Unknown items still default to 'Select Category' without guessing
+        self.assertEqual(determine_category("UNKNOWN HARDWARE WIDGET XYZ"), "Select Category")
+
+        # Explicit user selection takes precedence
+        self.assertEqual(
+            determine_category("UNKNOWN HARDWARE WIDGET XYZ", invoice_cat="Prototyping & Tools"),
+            "Prototyping & Tools"
+        )
+
 if __name__ == "__main__":
     unittest.main()
