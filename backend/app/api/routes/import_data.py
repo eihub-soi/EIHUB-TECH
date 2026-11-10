@@ -66,13 +66,13 @@ async def analyze_components(file: UploadFile = File(...), user=Depends(require_
     """
     import re
     from openpyxl import load_workbook
-    
+
     try:
         content = await file.read()
         if len(content) > 5 * 1024 * 1024:
             raise HTTPException(status_code=413, detail="File too large. Maximum size is 5MB.")
         filename = (file.filename or "").lower()
-        
+
         rows_list = []
         if filename.endswith(".csv"):
             import csv
@@ -91,17 +91,17 @@ async def analyze_components(file: UploadFile = File(...), user=Depends(require_
                 rows_list.append(list(r))
         else:
             raise HTTPException(status_code=400, detail="Unsupported file format. Please upload .csv, .xlsx, or .xls")
-            
+
         if not rows_list:
             raise HTTPException(status_code=400, detail="The uploaded file is empty.")
-            
+
         # Extract headers and clean column names
         header = [str(col).strip() if col is not None else "" for col in rows_list[0]]
-        
+
         # Remove completely empty headers or handle empty file check
         if all(h == "" for h in header):
             raise HTTPException(status_code=400, detail="The uploaded file is empty.")
-            
+
         # Clean data rows (strip spaces) and skip completely empty rows
         data_rows = []
         for r in rows_list[1:]:
@@ -120,10 +120,10 @@ async def analyze_components(file: UploadFile = File(...), user=Depends(require_
             else:
                 cleaned_row = cleaned_row[:len(header)]
             data_rows.append(cleaned_row)
-            
+
         if len(data_rows) > 5000:
             raise HTTPException(status_code=400, detail="The file contains too many rows. Maximum limit is 5000 rows.")
-            
+
         # Map columns to system fields
         column_mapping = {
             "sku code": "sku", "sku": "sku", "sku_code": "sku", "part number": "sku", "part_no": "sku", "part no": "sku",
@@ -136,10 +136,10 @@ async def analyze_components(file: UploadFile = File(...), user=Depends(require_
             "cabinet rack": "location", "cabinet": "location", "rack": "location", "cabinet/rack": "location", "location": "location",
             "image url": "image_url", "imageurl": "image_url", "image url": "image_url", "image": "image_url", "image_url": "image_url"
         }
-        
+
         detected_mapping = {}
         mapped_columns = {}
-        
+
         for col_idx, col in enumerate(header):
             col_clean = re.sub(r'[\s_\-]+', ' ', col.lower().strip())
             matched_sys_field = None
@@ -151,7 +151,7 @@ async def analyze_components(file: UploadFile = File(...), user=Depends(require_
             if matched_sys_field:
                 mapped_columns[col_idx] = matched_sys_field
                 detected_mapping[matched_sys_field] = col
-                
+
         system_field_labels = {
             "sku": "SKU Code",
             "category": "Category",
@@ -165,7 +165,7 @@ async def analyze_components(file: UploadFile = File(...), user=Depends(require_
         }
         required_fields = ["category", "name", "total_stock"]
         missing_required = [system_field_labels[r] for r in required_fields if r not in detected_mapping]
-        
+
         # Build dictionary for each row using expected system fields
         expected_cols = ["sku", "name", "category", "description", "features", "total_stock", "unit_cost", "location", "image_url"]
         row_dicts = []
@@ -174,11 +174,11 @@ async def analyze_components(file: UploadFile = File(...), user=Depends(require_
             for col_idx, sys_f in mapped_columns.items():
                 row_dict[sys_f] = r_vals[col_idx]
             row_dicts.append(row_dict)
-            
+
         # Core data formatting
         for row in row_dicts:
             row['sku'] = clean_sku(row['sku'])
-            
+
             name_val = row['name']
             if name_val is None or str(name_val).strip() == "":
                 row['name'] = None
@@ -188,7 +188,7 @@ async def analyze_components(file: UploadFile = File(...), user=Depends(require_
                     row['name'] = None
                 else:
                     row['name'] = name_str
-                    
+
             cat_val = row['category']
             if cat_val is None or str(cat_val).strip() == "":
                 row['category'] = "GENERAL"
@@ -198,12 +198,12 @@ async def analyze_components(file: UploadFile = File(...), user=Depends(require_
                     row['category'] = "GENERAL"
                 else:
                     row['category'] = cat_str
-                    
+
             row['description'] = str(row['description'] or "").strip()
             row['features'] = str(row['features'] or "").strip()
-            
+
             row['unit_cost'] = clean_currency(row['unit_cost'])
-            
+
             try:
                 stock_val = row['total_stock']
                 if stock_val is None or str(stock_val).strip() == "":
@@ -212,10 +212,10 @@ async def analyze_components(file: UploadFile = File(...), user=Depends(require_
                     row['total_stock'] = int(float(str(stock_val).strip()))
             except Exception:
                 row['total_stock'] = 0
-                
+
             row['location'] = str(row['location'] or "").strip()
             row['image_url'] = str(row['image_url'] or "").strip()
-            
+
         # Merge Duplicates in file by SKU Code (preserve leading zeroes/string formatting)
         valid_rows = []
         invalid_rows = []
@@ -226,7 +226,7 @@ async def analyze_components(file: UploadFile = File(...), user=Depends(require_
                 valid_rows.append(row)
             else:
                 invalid_rows.append(row)
-                
+
         grouped_valid = {}
         for row in valid_rows:
             norm_sku = row['sku'].strip().lower()
@@ -234,48 +234,48 @@ async def analyze_components(file: UploadFile = File(...), user=Depends(require_
                 grouped_valid[norm_sku] = dict(row)
             else:
                 grouped_valid[norm_sku]['total_stock'] += row['total_stock']
-                
+
         df_valid_grouped_list = list(grouped_valid.values())
         merged_duplicates_count = len(valid_rows) - len(df_valid_grouped_list)
         df_cleaned_list = df_valid_grouped_list + invalid_rows
-        
+
         validated_rows = []
         for idx, row_dict in enumerate(df_cleaned_list):
             errors = []
             warnings = []
             status_val = "valid"
-            
+
             sku_val = row_dict.get('sku')
             name_val = row_dict.get('name')
             category_val = row_dict.get('category')
             total_stock = row_dict.get('total_stock', 0)
             unit_cost = row_dict.get('unit_cost', 0.0)
             image_url = row_dict.get('image_url')
-            
 
-                
+
+
             if not name_val or str(name_val).strip() == "":
                 errors.append("Component Name is required")
                 status_val = "error"
-                
+
             if not category_val or str(category_val).strip() == "":
                 errors.append("Category is required")
                 status_val = "error"
-                
+
             if total_stock < 0:
                 errors.append("Total Stock cannot be negative")
                 status_val = "error"
-                
+
             if unit_cost < 0:
                 errors.append("Unit Cost cannot be negative")
                 status_val = "error"
-                
+
             if image_url:
                 url_str = str(image_url).strip()
                 if url_str and not url_str.startswith(("http://", "https://")):
                      errors.append("Image URL format is invalid")
                      status_val = "error"
-                
+
             comp_cats = ["sensor", "microcontroller", "resistor", "capacitor", "ic", "module", "display", "connector", "development board", "embedded component", "electronic component", "add-on", "component", "diode"]
             is_component_like = False
             if category_val:
@@ -288,9 +288,9 @@ async def analyze_components(file: UploadFile = File(...), user=Depends(require_
                     warnings.append(f"Category '{category_val}' is not a standard component category.")
                     if status_val == "valid":
                         status_val = "warning"
-                        
+
             is_filtered = False
-            
+
             validated_rows.append({
                 "__row_index": idx,
                 "status": status_val,
@@ -309,11 +309,11 @@ async def analyze_components(file: UploadFile = File(...), user=Depends(require_
                     "image_url": row_dict.get("image_url", ""),
                 }
             })
-            
+
         total_rows = len(validated_rows)
         invalid_rows = sum(1 for r in validated_rows if r["status"] == "error")
         valid_rows = total_rows - invalid_rows
-        
+
         system_field_labels = {
             "sku": "SKU Code",
             "category": "Category",
@@ -325,7 +325,7 @@ async def analyze_components(file: UploadFile = File(...), user=Depends(require_
             "location": "Cabinet Rack",
             "image_url": "Image URL"
         }
-        
+
         readable_mapping = []
         for sys_f, label in system_field_labels.items():
             excel_col = detected_mapping.get(sys_f, "(Not Found - will use default value)")
@@ -334,7 +334,7 @@ async def analyze_components(file: UploadFile = File(...), user=Depends(require_
                 "excelColumn": excel_col,
                 "isFound": sys_f in detected_mapping
             })
-            
+
         return {
             "success": True,
             "stats": {
@@ -347,7 +347,7 @@ async def analyze_components(file: UploadFile = File(...), user=Depends(require_
             "missing_required": missing_required,
             "rows": validated_rows
         }
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
@@ -369,11 +369,11 @@ async def verify_components(req: VerificationRequest, user=Depends(require_facul
             norm = normalize_name(c["name"])
             if norm:
                 name_lookup[norm] = c
-                
+
         new_count = 0
         existing_count = 0
         invalid_count = 0
-        
+
         verified_rows = []
         for row in req.rows:
             data = row["data"]
@@ -381,7 +381,7 @@ async def verify_components(req: VerificationRequest, user=Depends(require_facul
             name_val = data.get("name")
             norm_sku = str(sku_val or "").strip().lower()
             norm_name = normalize_name(name_val)
-            
+
             if row.get("status") == "error" or not name_val:
                 row["is_new"] = False
                 row["is_existing"] = False
@@ -392,13 +392,13 @@ async def verify_components(req: VerificationRequest, user=Depends(require_facul
                 invalid_count += 1
                 verified_rows.append(row)
                 continue
-                
+
             existing_item = None
             if norm_sku and norm_sku in sku_lookup:
                 existing_item = sku_lookup[norm_sku]
             elif norm_name and norm_name in name_lookup:
                 existing_item = name_lookup[norm_name]
-                
+
             if existing_item:
                 is_existing = True
                 existing_id = existing_item["id"]
@@ -411,10 +411,10 @@ async def verify_components(req: VerificationRequest, user=Depends(require_facul
                 old_stock = 0
                 old_available = 0
                 new_count += 1
-                
+
             uploaded_stock = int(data.get("total_stock", 0))
             new_stock_add = old_stock + uploaded_stock
-            
+
             row["is_new"] = not is_existing
             row["is_existing"] = is_existing
             row["existing_id"] = existing_id
@@ -422,9 +422,9 @@ async def verify_components(req: VerificationRequest, user=Depends(require_facul
             row["old_stock"] = old_stock
             row["old_available"] = old_available
             row["new_stock_add"] = new_stock_add
-            
+
             verified_rows.append(row)
-            
+
         return {
             "stats": {
                 "total_rows": len(verified_rows),
@@ -434,7 +434,7 @@ async def verify_components(req: VerificationRequest, user=Depends(require_facul
             },
             "rows": verified_rows
         }
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Verification failed: {str(e)}")
 
@@ -445,41 +445,41 @@ async def commit_components(req: ComponentCommitRequest, user=Depends(require_fa
     """
     import uuid
     from app.main import Statement
-    
+
     # Filter selected valid rows
     valid_rows = [r for r in req.rows if r.get("status") != "error"]
     if not valid_rows:
         raise HTTPException(status_code=400, detail="No valid rows selected for import")
-        
+
     queries = []
     args = []
-    
+
     imported = 0
     updated = 0
     stock_units_added = 0
     duplicates_merged_total = 0
-    
+
     # Get latest stock values from D1 to prevent race conditions during transaction
     try:
         existing = await db_query("SELECT id, total_stock, available_stock FROM components")
         db_stock_lookup = {c["id"]: c for c in existing}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to query current inventory: {str(e)}")
-        
+
     for row in valid_rows:
         data = row.get("data", {})
         is_new = row.get("is_new", True)
         is_existing = row.get("is_existing", False)
         existing_id = row.get("existing_id")
-        
+
         uploaded_stock = int(data.get("total_stock", 0))
-        
+
         # Serialize Features and SKU into Description so we do not lose useful metadata
         desc = data.get("description", "")
         features = data.get("features", "")
         unit_cost = data.get("unit_cost", 0.0)
         sku = data.get("sku", "")
-        
+
         metadata_lines = []
         if features:
             metadata_lines.append(f"Features: {features}")
@@ -487,10 +487,10 @@ async def commit_components(req: ComponentCommitRequest, user=Depends(require_fa
             metadata_lines.append(f"SKU Code: {sku}")
         if unit_cost > 0:
             metadata_lines.append(f"Unit Cost: Rs. {unit_cost}")
-            
+
         if metadata_lines:
             desc = f"{desc}\n\n[Imported Metadata]\n" + " | ".join(metadata_lines)
-            
+
         if is_existing and existing_id:
             # Existing component update
             db_item = db_stock_lookup.get(existing_id)
@@ -500,12 +500,12 @@ async def commit_components(req: ComponentCommitRequest, user=Depends(require_fa
             else:
                 old_total = int(row.get("old_stock", 0))
                 old_available = int(row.get("old_available", 0))
-                
+
             # Always use incremental addition only (replace/overwrite mode is removed and ignored)
             new_total = old_total + uploaded_stock
             new_available = old_available + uploaded_stock
             stock_units_added += uploaded_stock
-                
+
             queries.append(
                 """
                 UPDATE components
@@ -551,7 +551,7 @@ async def commit_components(req: ComponentCommitRequest, user=Depends(require_fa
             ])
             imported += 1
             stock_units_added += uploaded_stock
-            
+
     if not queries:
         return {
             "success": True,
@@ -563,7 +563,7 @@ async def commit_components(req: ComponentCommitRequest, user=Depends(require_fa
                 "duplicates_merged": 0
             }
         }
-        
+
     try:
         # Batch execute safely. Cloudflare D1 guarantees all statements run in a transaction.
         batch_size = 200
@@ -572,14 +572,14 @@ async def commit_components(req: ComponentCommitRequest, user=Depends(require_fa
             batch_a = args[i : i + batch_size]
             statements = [Statement(q, a) for q, a in zip(batch_q, batch_a)]
             await db_batch(statements)
-            
+
         # Clear local memory cache if present
         try:
             from app.main import COMPONENTS_CACHE
             await COMPONENTS_CACHE.clear()
         except Exception:
             pass
-            
+
         # Log Bulk Import Activity
         await log_activity(
             user_id=user.get("uid"),
@@ -594,7 +594,7 @@ async def commit_components(req: ComponentCommitRequest, user=Depends(require_fa
                 "mode": "add"
             }
         )
-        
+
         return {
             "success": True,
             "message": f"Successfully completed bulk import.",
@@ -604,7 +604,7 @@ async def commit_components(req: ComponentCommitRequest, user=Depends(require_fa
                 "stock_units_added": stock_units_added
             }
         }
-        
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database Transaction Failed: {str(e)}")
 
@@ -646,7 +646,7 @@ ocr_executor = ThreadPoolExecutor(max_workers=4)
 def configure_ocr_engine():
     """Configures Tesseract and tessdata paths dynamically from environment and system PATH."""
     import shutil
-    
+
     # 1. Tesseract Executable: Check environment variables first
     env_tess = os.environ.get("TESSERACT_CMD") or os.environ.get("TESSERACT_PATH")
     if env_tess and os.path.exists(env_tess):
@@ -704,12 +704,12 @@ def get_poppler_path() -> Optional[str]:
     env_pop = os.environ.get("POPPLER_PATH")
     if env_pop and os.path.exists(env_pop):
         return env_pop
-        
+
     # 2. If pdftoppm is already in system PATH (standard on Linux/Docker and configured Windows), return None
     import shutil
     if shutil.which("pdftoppm"):
         return None
-        
+
     # 3. OS-specific discovery
     if os.name == 'nt':
         import glob
@@ -799,57 +799,57 @@ def get_mock_image_to_data() -> Dict[str, Any]:
         ("Qty", 400, 100, 30, 15),
         ("Rate", 500, 100, 40, 15),
         ("Amount", 600, 100, 60, 15),
-        
+
         # Row 1 (Y=150) - Existing exact component match
         ("Arduino Uno Board", 100, 150, 160, 12),
         ("10", 400, 150, 20, 12),
         ("450.00", 500, 150, 50, 12),
         ("4,500.00", 600, 150, 60, 12),
-        
+
         # Row 2 (Y=180) - Duplicate line item (same component name, different casing)
         ("arduino uno board", 100, 180, 160, 12),
         ("5", 400, 180, 10, 12),
         ("450.00", 500, 180, 50, 12),
         ("2,250.00", 600, 180, 60, 12),
-        
+
         # Row 3 (Y=210) - Existing DB component
         ("ESP32 DevKit", 100, 210, 120, 12),
         ("5", 400, 210, 10, 12),
         ("350.00", 500, 210, 50, 12),
         ("1,750.00", 600, 210, 60, 12),
-        
+
         # Row 4 (Y=240) - Low confidence item (to test low confidence display)
         ("ESP32 WROOM Module", 100, 240, 150, 12),
         ("10", 400, 240, 20, 12),
         ("250.00", 500, 240, 50, 12),
         ("2,500.00", 600, 240, 60, 12),
-        
+
         # Row 5 (Y=270) - Non-component courier charge (to test exclusion)
         ("Courier Charges", 100, 270, 120, 12),
         ("1", 400, 270, 10, 12),
         ("120.00", 500, 270, 50, 12),
         ("120.00", 600, 270, 60, 12),
-        
+
         # Row 6 (Y=300) - Unresolved possible match (very similar to Arduino Uno Board / ESP32 DevKit in DB)
         ("ESP32 DevKit V1", 100, 300, 130, 12),
         ("2", 400, 300, 10, 12),
         ("360.00", 500, 300, 50, 12),
         ("720.00", 600, 300, 60, 12),
-        
+
         # Summary rows (to test financial validations)
         ("Subtotal", 100, 350, 80, 12),
         ("11,840.00", 600, 350, 80, 12),
-        
+
         ("CGST 9%", 100, 380, 80, 12),
         ("1,065.60", 600, 380, 80, 12),
-        
+
         ("SGST 9%", 100, 410, 80, 12),
         ("1,065.60", 600, 410, 80, 12),
-        
+
         ("Grand Total", 100, 450, 100, 15),
         ("13,971.20", 600, 450, 90, 15)
     ]
-    
+
     text_list, left_list, top_list, width_list, height_list, conf_list = [], [], [], [], [], []
     for word_info in words_data:
         parts = word_info[0].split()
@@ -866,7 +866,7 @@ def get_mock_image_to_data() -> Dict[str, Any]:
             else:
                 conf_list.append(95.0)
             x_offset += part_width + 5
-            
+
     return {
         'text': text_list,
         'left': left_list,
@@ -895,12 +895,12 @@ def deskew_image(img: Image.Image) -> Tuple[Image.Image, float]:
         target_w = max(int(w * scale), 20)
         target_h = max(int(h * scale), 20)
         thumb = thumb.resize((target_w, target_h), Image.Resampling.BILINEAR)
-        
+
         # High-pass filter: subtract local mean blur to isolate text strokes from shadows
         blur = thumb.filter(ImageFilter.BoxBlur(10))
         hp = np.array(thumb, dtype=float) - np.array(blur, dtype=float)
         binary = np.where(hp < -5, 255, 0).astype(np.uint8)
-        
+
         best_angle = 0.0
         best_var = -1.0
         for a in np.arange(-10.0, 10.5, 0.5):
@@ -910,7 +910,7 @@ def deskew_image(img: Image.Image) -> Tuple[Image.Image, float]:
             if var > best_var:
                 best_var = var
                 best_angle = float(a)
-                
+
         if abs(best_angle) >= 0.5:
             return img.rotate(best_angle, resample=Image.Resampling.BICUBIC, expand=True, fillcolor=255), best_angle
     except Exception as e:
@@ -940,11 +940,11 @@ def get_preprocessed_images(img: Image.Image) -> Dict[str, Image.Image]:
     versions = {}
     img_gray = img.convert("L")
     w, h = img.size
-    
+
     # 1. Base Grayscale (Original resolution)
     versions['version_e'] = img_gray
     versions['raw_grayscale'] = img_gray
-    
+
     # 2. Scaled High-Resolution (clean Lanczos for fine character glyph discrimination)
     try:
         max_dim = max(w, h)
@@ -977,7 +977,7 @@ def get_preprocessed_images(img: Image.Image) -> Dict[str, Image.Image]:
             versions['scaled_denoised'] = denoised
     except Exception:
         pass
-    
+
     # 4. Standard Enhanced: Grayscale + Autocontrast + Sharpening (Version A)
     try:
         auto_c = ImageOps.autocontrast(img_gray, cutoff=1)
@@ -987,7 +987,7 @@ def get_preprocessed_images(img: Image.Image) -> Dict[str, Image.Image]:
     except Exception:
         versions['version_a'] = img_gray.resize((w * 2, h * 2), Image.Resampling.LANCZOS)
         versions['standard_enhanced'] = versions['version_a']
-        
+
     # 5. High Contrast: Grayscale + 1.6x contrast + sharpen (Version B)
     try:
         enhanced = ImageEnhance.Contrast(img_gray).enhance(1.6)
@@ -996,10 +996,10 @@ def get_preprocessed_images(img: Image.Image) -> Dict[str, Image.Image]:
     except Exception:
         versions['version_b'] = img_gray
         versions['high_contrast'] = img_gray
-        
+
     # 6. Sharpened only (Version D)
     versions['version_d'] = img_gray.filter(ImageFilter.SHARPEN)
-    
+
     # 7. Otsu Global Binarization with 3x3 Median Noise Filter (Version C)
     try:
         denoised = img_gray.filter(ImageFilter.MedianFilter(size=3))
@@ -1038,7 +1038,7 @@ def get_preprocessed_images(img: Image.Image) -> Dict[str, Image.Image]:
             versions['otsu_filtered'] = thresh
         except Exception:
             pass
-            
+
     # 8. Adaptive Local Neighborhood Thresholding (Handles shadows and gradient illumination)
     try:
         work_img = img_gray.resize((int(w * 1.5), int(h * 1.5)), Image.Resampling.BILINEAR) if w < 2000 else img_gray
@@ -1049,8 +1049,113 @@ def get_preprocessed_images(img: Image.Image) -> Dict[str, Image.Image]:
         versions['adaptive_thresh'] = Image.fromarray(thresh_local)
     except Exception as e:
         print(f"[OCR Preprocessing] Adaptive threshold failed: {e}")
-        
+
     return versions
+
+SPEC_UNITS = {
+    'channel', 'channels', 'ch', 'pin', 'pins', 'way', 'ways', 'port', 'ports',
+    'core', 'cores', 'wire', 'wires', 'cell', 'cells', 'bit', 'bits',
+    'phase', 'gang', 'inch', 'inches', 'mm', 'cm', 'm', 'v', 'volt', 'volts',
+    'w', 'watt', 'watts', 'a', 'amp', 'amps', 'ma', 'ohm', 'ohms', 'k', 'mhz', 'ghz'
+}
+
+def clean_item_serial_number(name: str, row_idx: Optional[int] = None) -> str:
+    """
+    Strips leading invoice serial numbers (e.g. '7 SENSOR MODULE' -> 'SENSOR MODULE',
+    '8 18650 - 1 CELL HOLDER' -> '18650 - 1 CELL HOLDER', '9 SWITCH' -> 'SWITCH')
+    while preserving product model numbers (e.g. '18650', 'NE555P', '1N4007', '7805', '8 CHANNEL RELAY').
+    """
+    if not name:
+        return ""
+    s = name.strip()
+
+    # 1. Delimited serial number: e.g. "1. SENSOR", "01) RESISTOR", "1 - SWITCH", "1: LED"
+    m_delim = re.match(r'^\s*(\d{1,3})\s*[\.\)\-:]\s*(.+)$', s)
+    if m_delim:
+        rest = m_delim.group(2).strip()
+        if rest:
+            return rest
+
+    # 2. Space-separated serial number: e.g. "7 SENSOR MODULE", "8 18650 - 1 CELL HOLDER", "9 SWITCH", "10 RGB LED"
+    m_space = re.match(r'^\s*(\d{1,3})\s+([A-Za-z0-9].*)$', s)
+    if m_space:
+        num_str = m_space.group(1)
+        num_val = int(num_str)
+        rest = m_space.group(2).strip()
+
+        tokens = rest.split()
+        first_token_lower = tokens[0].lower() if tokens else ""
+
+        # If the number matches row sequence (row_idx + 1)
+        is_seq_match = (row_idx is not None and abs(num_val - (row_idx + 1)) <= 1)
+
+        # If first token is a specification unit (like "channel", "pin", "cell"), only strip if num_val matches sequence
+        if first_token_lower in SPEC_UNITS:
+            if is_seq_match and len(tokens) > 1:
+                return rest
+            else:
+                return s
+
+        # If rest starts with an alphabet, or a 4+ digit model number (e.g. 18650), or model with letters (e.g. 1N4007)
+        if re.match(r'^[A-Za-z]|^\d{4,}|^\d+[A-Za-z]', rest):
+            return rest
+
+        if is_seq_match:
+            return rest
+
+    return s
+
+def is_invoice_summary_row(name: str, full_row_text: str = "") -> Tuple[bool, Optional[str]]:
+    """
+    Identifies whether a parsed row is an invoice summary/tax/total row rather than a product line item.
+    Returns (is_summary, summary_field_type).
+    """
+    combined = f"{name} {full_row_text}".lower().strip()
+    name_clean = re.sub(r'^[.\s,:;_\-]+', '', name).strip().lower()
+
+    # 1. Grand Total / Total Amount / Net Amount
+    if re.search(r'\b(?:grand\s*total|invoice\s*amount|bill\s*amount|amount\s*payable|net\s*payable|net\s*amount|total\s*payable|total\s*invoice\s*value)\b', combined):
+        return True, "grand_total"
+    if re.match(r'^total(?:\s*amount|\s*value|\s*payable|\s*taxable|\s*invoice|\s*before\s*tax|\s*[:\-]|\s*₹?\s*[\d,]+|\s*$)', name_clean):
+        return True, "grand_total"
+
+    # 2. Sub Total / Total before tax
+    if re.search(r'\b(?:sub\s*total|sub-total|subtotal|total\s*before\s*tax)\b', combined):
+        return True, "subtotal"
+
+    # 3. Taxable Amount / Value
+    if re.search(r'\b(?:taxable\s*amount|taxable\s*value|total\s*taxable\s*value|total\s*taxable)\b', combined):
+        return True, "taxable_amount"
+
+    # 4. CGST
+    if re.search(r'\b(?:cgst|central\s*tax|central\s*gst)\b', combined):
+        return True, "cgst"
+
+    # 5. SGST / UTGST
+    if re.search(r'\b(?:sgst|state\s*tax|state\s*gst|utgst)\b', combined):
+        return True, "sgst"
+
+    # 6. IGST
+    if re.search(r'\b(?:igst|integrated\s*tax|integrated\s*gst)\b', combined):
+        return True, "igst"
+
+    # 7. Total Tax / GST
+    if re.search(r'\b(?:total\s*tax|total\s*gst|gst\s*tax|tax\s*amount)\b', combined):
+        return True, "gst_tax"
+
+    # 8. Discount
+    if re.search(r'\b(?:additional\s*discount|trade\s*discount|discount|disc)\b', combined) and not re.search(r'\b(?:resistor|capacitor|cable|switch|sensor|ic|diode|led|board)\b', combined):
+        return True, "discount"
+
+    # 9. Round off
+    if re.search(r'\b(?:round\s*off|round-off|roundoff)\b', combined):
+        return True, "round_off"
+
+    # 10. Amount in words / Rupees in words
+    if re.search(r'\b(?:rupees|amount)\s+in\s+words\b', combined):
+        return True, "words"
+
+    return False, None
 
 def parse_ocr_coordinates(raw_data: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -1072,16 +1177,16 @@ def parse_ocr_coordinates(raw_data: Dict[str, Any]) -> Dict[str, Any]:
                 'height': int(raw_data['height'][i]),
                 'conf': conf
             })
-            
+
     # Group words into lines using Tesseract's native layout blocks when available,
     # or fallback to fixed-anchor coordinate grouping to prevent cross-line chaining.
     has_tess_lines = (
-        'line_num' in raw_data and 
-        'block_num' in raw_data and 
-        'par_num' in raw_data and 
+        'line_num' in raw_data and
+        'block_num' in raw_data and
+        'par_num' in raw_data and
         len(raw_data['line_num']) == n_boxes
     )
-    
+
     if has_tess_lines:
         line_dict = {}
         for i in range(n_boxes):
@@ -1113,19 +1218,19 @@ def parse_ocr_coordinates(raw_data: Dict[str, Any]) -> Dict[str, Any]:
                     break
             if not placed:
                 rows.append([w])
-            
+
     for r in rows:
         r.sort(key=lambda x: x['left'])
-        
+
     # Reconstruct whole row texts for fallback/regex matching
     all_row_texts = [" ".join([w['text'] for w in r]) for r in rows]
-    
+
     # Table Header Detection
     HEADER_KEYWORDS = {
-        'item', 'description', 'product', 'particulars', 'hsn', 'sac', 'qty', 
+        'item', 'description', 'product', 'particulars', 'hsn', 'sac', 'qty',
         'quantity', 'unit', 'rate', 'price', 'unit price', 'amount', 'total'
     }
-    
+
     header_row_idx = -1
     for idx, r in enumerate(rows):
         row_text_lower = " ".join([w['text'].lower() for w in r])
@@ -1136,14 +1241,14 @@ def parse_ocr_coordinates(raw_data: Dict[str, Any]) -> Dict[str, Any]:
         if matches >= 2 and not any(k in row_text_lower for k in ["grand total", "subtotal", "tax total"]):
             header_row_idx = idx
             break
-            
+
     col_buckets = []
     header_found = False
-    
+
     if header_row_idx != -1:
         header_found = True
         header_words = rows[header_row_idx]
-        
+
         # Merge adjacent header words (like "Unit" and "Price" -> "Unit Price")
         grouped_headers = []
         current_gh = None
@@ -1161,14 +1266,14 @@ def parse_ocr_coordinates(raw_data: Dict[str, Any]) -> Dict[str, Any]:
                     current_gh = hw.copy()
         if current_gh:
             grouped_headers.append(current_gh)
-            
+
         col_ranges = {}
         for gh in grouped_headers:
             txt = gh['text'].lower()
             x_start = gh['left']
             x_end = gh['left'] + gh['width']
             col_type = None
-            
+
             if any(k in txt for k in ['item', 'description', 'product', 'particulars', 'name', 'desc']):
                 col_type = 'item_name'
             elif any(k in txt for k in ['hsn', 'sac']):
@@ -1181,14 +1286,14 @@ def parse_ocr_coordinates(raw_data: Dict[str, Any]) -> Dict[str, Any]:
                 col_type = 'unit_price'
             elif any(k in txt for k in ['amount', 'total', 'val', 'value']) and not any(k in txt for k in ['sub', 'grand', 'tax']):
                 col_type = 'total'
-                
+
             if col_type:
                 if col_type in col_ranges:
                     prev_start, prev_end = col_ranges[col_type]
                     col_ranges[col_type] = (min(prev_start, x_start), max(prev_end, x_end))
                 else:
                     col_ranges[col_type] = (x_start, x_end)
-                    
+
         # Compute horizontal bucket boundaries based on midpoints of columns
         sorted_cols = sorted(col_ranges.items(), key=lambda x: x[1][0])
         for i in range(len(sorted_cols)):
@@ -1200,32 +1305,38 @@ def parse_ocr_coordinates(raw_data: Dict[str, Any]) -> Dict[str, Any]:
                 'left_bound': left_bound,
                 'right_bound': right_bound
             })
-            
+
     parsed_items = []
-    
+
     SUMMARY_TERMINATION_KEYWORDS = {
-        'subtotal', 'sub-total', 'sub total', 'grand total', 'total amount', 
+        'subtotal', 'sub-total', 'sub total', 'grand total', 'total amount',
         'amount payable', 'net payable', 'net amount', 'total payable',
-        'taxable amount', 'taxable value', 'total tax', 'cgst', 'sgst', 'igst', 
+        'taxable amount', 'taxable value', 'total tax', 'cgst', 'sgst', 'igst',
         'round off', 'round-off', 'amount in words', 'rupees in words'
     }
-    
+
     # Process all rows below the header (or all rows if no header is found)
     start_row_idx = header_row_idx + 1 if header_row_idx != -1 else 0
     for r_idx in range(start_row_idx, len(rows)):
         row_words = rows[r_idx]
         row_text_raw = " ".join([w['text'] for w in row_words])
         row_text_lower = row_text_raw.lower()
-        
+
         # Stop table row parsing once footer/summary totals or tax sections are reached
+        is_sum, _ = is_invoice_summary_row(row_text_raw, row_text_raw)
+        if is_sum:
+            if header_found:
+                break
+            else:
+                continue
         if header_found and any(kw in row_text_lower for kw in SUMMARY_TERMINATION_KEYWORDS):
             break
-        
+
         row_data = {
             'item_name': [], 'quantity': [], 'unit': [], 'unit_price': [], 'total': [], 'hsn': []
         }
         row_confs = {k: [] for k in row_data.keys()}
-        
+
         if header_found and col_buckets:
             for w in row_words:
                 w_center = w['left'] + w['width'] / 2.0
@@ -1251,24 +1362,24 @@ def parse_ocr_coordinates(raw_data: Dict[str, Any]) -> Dict[str, Any]:
                 row_data['total'] = [match.group(4)]
                 for k in row_confs.keys():
                     row_confs[k] = [w['conf'] for w in row_words]
-                    
+
         item_name_str = " ".join(row_data['item_name']).strip()
         # Clean leading noise characters (like '. ', ': ', '; ', '- ')
         item_name_str = re.sub(r'^[.\s,:;_\-]+', '', item_name_str).strip()
-        
+
         qty_str = "".join(row_data['quantity']).strip()
         unit_str = " ".join(row_data['unit']).strip()
         price_str = "".join(row_data['unit_price']).strip()
         total_str = "".join(row_data['total']).strip()
         hsn_str = " ".join(row_data['hsn']).strip()
-        
+
         if not any([item_name_str, qty_str, price_str, total_str]):
             continue
-            
+
         # An item description in an invoice table must contain at least one alphanumeric character
         if not re.search(r'[a-zA-Z0-9]', item_name_str):
             continue
-            
+
         def clean_numeric(val_str):
             if not val_str:
                 return ""
@@ -1290,11 +1401,11 @@ def parse_ocr_coordinates(raw_data: Dict[str, Any]) -> Dict[str, Any]:
                     parts = v.split('.')
                     v = parts[0] + '.' + ''.join(parts[1:])
             return v
-            
+
         qty_val = None
         price_val = None
         total_val = None
-        
+
         qty_clean = clean_numeric(qty_str)
         if qty_clean:
             try:
@@ -1313,22 +1424,22 @@ def parse_ocr_coordinates(raw_data: Dict[str, Any]) -> Dict[str, Any]:
                 total_val = float(total_clean)
             except ValueError:
                 pass
-                
+
         all_confs = []
         for k, v in row_confs.items():
             all_confs.extend(v)
         avg_conf = sum(all_confs) / len(all_confs) if all_confs else 100.0
-        
+
         calc_row_total = round(qty_val * price_val, 2) if (qty_val is not None and price_val is not None) else None
-        
+
         # If total_val is missing or 0, but qty and price are present
         row_effective_total = total_val if (total_val is not None and total_val > 0) else (calc_row_total if calc_row_total is not None else 0.0)
-        
+
         # If price_val is missing or 0, but total and qty are present
         if (price_val is None or price_val == 0.0) and (total_val is not None and total_val > 0) and (qty_val is not None and qty_val > 0):
             price_val = round(total_val / qty_val, 2)
             calc_row_total = total_val
-        
+
         field_confs = {
             'item_name': sum(row_confs['item_name']) / len(row_confs['item_name']) if row_confs['item_name'] else 0.0,
             'quantity': sum(row_confs['quantity']) / len(row_confs['quantity']) if row_confs['quantity'] else 0.0,
@@ -1336,7 +1447,7 @@ def parse_ocr_coordinates(raw_data: Dict[str, Any]) -> Dict[str, Any]:
             'total': sum(row_confs['total']) / len(row_confs['total']) if row_confs['total'] else 0.0,
             'hsn': sum(row_confs['hsn']) / len(row_confs['hsn']) if row_confs['hsn'] else 0.0,
         }
-        
+
         parsed_items.append({
             'original_item_name': item_name_str,
             'item_name': item_name_str,
@@ -1360,7 +1471,7 @@ def parse_ocr_coordinates(raw_data: Dict[str, Any]) -> Dict[str, Any]:
             },
             'original_row_text': " ".join([w['text'] for w in row_words])
         })
-        
+
     return {
         'header_found': header_found,
         'raw_rows': parsed_items,
@@ -1372,10 +1483,10 @@ def score_ocr_result(parsed_data: Dict[str, Any], target_grand_total: float = 0.
     score = 0.0
     if parsed_data.get('header_found'):
         score += 120.0
-        
+
     line_items = parsed_data.get('raw_rows', [])
     score += min(len(line_items) * 15.0, 150.0)
-    
+
     consistent_rows = 0
     for item in line_items:
         qty = item.get('raw_quantity') or item.get('quantity', 0)
@@ -1384,11 +1495,11 @@ def score_ocr_result(parsed_data: Dict[str, Any], target_grand_total: float = 0.
         if qty and rate and tot and abs((qty * rate) - tot) <= 1.0:
             consistent_rows += 1
     score += consistent_rows * 40.0
-    
+
     confs = [item.get('confidence_score', 100.0) for item in line_items]
     if confs:
         score += sum(confs) / len(confs)
-        
+
     calc_total = sum(item.get('total', 0.0) for item in line_items)
     if target_grand_total > 0 and abs(calc_total - target_grand_total) < 5.0:
         score += 50.0
@@ -1400,7 +1511,7 @@ def score_ocr_result(parsed_data: Dict[str, Any], target_grand_total: float = 0.
         # Check alphanumeric ratio to penalize unreadable garbage symbol output
         alnum_chars = sum(1 for c in raw_text if c.isalnum() or c.isspace() or c in ".,:-/₹")
         score += (alnum_chars / max(len(raw_text), 1)) * 40.0
-        
+
     return score
 
 def extract_words_from_pdf_text(content: bytes) -> List[Dict[str, Any]]:
@@ -1412,7 +1523,7 @@ def extract_words_from_pdf_text(content: bytes) -> List[Dict[str, Any]]:
         for page_idx, page in enumerate(reader.pages):
             box = page.mediabox
             page_height = float(box.height) if box else 800.0
-            
+
             page_words = []
             def visitor_text(text, cm, tm, fontDict, fontSize):
                 t = text.strip()
@@ -1461,12 +1572,12 @@ def determine_category(name: str, invoice_cat: Optional[str] = None, existing_ca
         return invoice_cat.strip()
     if existing_cat and existing_cat.strip() and existing_cat.strip() not in ["Electronics", "Select Category"]:
         return existing_cat.strip()
-        
+
     name_l = name.lower()
     for kw, cat in KNOWN_CATEGORY_MAPPINGS.items():
         if kw in name_l:
             return cat
-            
+
     return "Select Category"
 
 async def evaluate_line_item(item: Dict[str, Any], comp_map: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
@@ -1488,7 +1599,7 @@ async def evaluate_line_item(item: Dict[str, Any], comp_map: Dict[str, Dict[str,
     category = item.get("category", "").strip()
     conf_score = float(item.get("confidence_score", 100.0))
     is_accepted_as_new = item.get("accepted_as_new", False)
-    
+
     errors = []
     warnings = []
     status = "NEW"
@@ -1496,7 +1607,7 @@ async def evaluate_line_item(item: Dict[str, Any], comp_map: Dict[str, Dict[str,
     matched_component = None
     existing_id = None
     old_stock = 0
-    
+
     # Absolute extraction validations
     if not name:
         errors.append("Component name is required")
@@ -1504,7 +1615,7 @@ async def evaluate_line_item(item: Dict[str, Any], comp_map: Dict[str, Dict[str,
         errors.append("Quantity must be greater than zero")
     if price < 0:
         errors.append("Price cannot be negative")
-        
+
     # Check row-level math using exact Decimal arithmetic
     try:
         qty_d = Decimal(str(qty))
@@ -1515,11 +1626,11 @@ async def evaluate_line_item(item: Dict[str, Any], comp_map: Dict[str, Dict[str,
             warnings.append(f"Row total mismatch: expected ₹{expected_d:.2f}, got ₹{tot_d:.2f}")
     except Exception:
         pass
-        
+
     # Multi-level DB Matching
     norm = normalize_name(name)
     matched_db_comp = None
-    
+
     if norm in comp_map:
         matched_db_comp = comp_map[norm]
         status = "✓ VERIFIED EXISTING"
@@ -1530,7 +1641,7 @@ async def evaluate_line_item(item: Dict[str, Any], comp_map: Dict[str, Dict[str,
                 matched_db_comp = db_c
                 status = "✓ VERIFIED EXISTING"
                 break
-                
+
     if matched_db_comp:
         existing_id = matched_db_comp["id"]
         old_stock = matched_db_comp["total_stock"]
@@ -1558,7 +1669,7 @@ async def evaluate_line_item(item: Dict[str, Any], comp_map: Dict[str, Dict[str,
             "is_new": False,
             "is_existing": True
         }
-        
+
     # Fuzzy matching recommendations (similarity >= 80%)
     best_match = None
     best_sim = 0.0
@@ -1567,7 +1678,7 @@ async def evaluate_line_item(item: Dict[str, Any], comp_map: Dict[str, Dict[str,
         if sim > best_sim:
             best_sim = sim
             best_match = db_c
-            
+
     if best_sim >= 0.80 and not is_accepted_as_new and best_match is not None:
         status = "⚠ POSSIBLE MATCH"
         possible_match = {
@@ -1581,23 +1692,23 @@ async def evaluate_line_item(item: Dict[str, Any], comp_map: Dict[str, Dict[str,
         warnings.append(f"Fuzzy match found: '{best_match['name']}' ({possible_match['similarity']}% similarity)")
     else:
         status = "✓ VERIFIED NEW"
-        
+
     # OCR confidence warning
     if conf_score < 75.0:
         warnings.append(f"Low OCR confidence ({int(conf_score)}%)")
         if status not in ["⚠ POSSIBLE MATCH"]:
             status = "⚠ LOW OCR CONFIDENCE"
-            
+
     category = determine_category(name, category)
     if category == "Select Category":
         errors.append("Required category selection")
         if status not in ["⚠ POSSIBLE MATCH", "⚠ LOW OCR CONFIDENCE"]:
             status = "⚠ NEEDS EDIT"
-            
+
     # Set status override for errors
     if errors:
         status = "✕ INVALID" if status != "⚠ POSSIBLE MATCH" else status
-        
+
     return {
         **item,
         "original_item_name": original_name,
@@ -1640,11 +1751,11 @@ def perform_ocr_sync(content: bytes, is_pdf: bool) -> Dict[str, Any]:
             parsed = parse_ocr_coordinates(raw_data)
             parsed['raw_text'] = "\n".join(parsed['all_row_texts'])
             return parsed
-            
+
     # Step 2: Convert to Images & apply Multi-pass Image OCR
     tess_available = is_tesseract_available()
     cloud_ocr_key = os.environ.get("GOOGLE_VISION_API_KEY") or os.environ.get("OCR_API_KEY")
-    
+
     if not tess_available and not cloud_ocr_key:
         print("[OCR Warning] Neither Tesseract nor Cloud Vision API key is configured. Utilizing structured fallback for manual entry.")
         raw_data = get_mock_image_to_data()
@@ -1668,7 +1779,7 @@ def perform_ocr_sync(content: bytes, is_pdf: bool) -> Dict[str, Any]:
             pages = [Image.open(io.BytesIO(content))]
         except Exception as e:
             print(f"[OCR Open Image] Image open failed: {e}")
-            
+
     if not pages:
         raw_data = get_mock_image_to_data()
         parsed = parse_ocr_coordinates(raw_data)
@@ -1682,14 +1793,14 @@ def perform_ocr_sync(content: bytes, is_pdf: bool) -> Dict[str, Any]:
         p_deskewed, detected_skew = deskew_image(p_oriented)
         processed_pages.append(p_deskewed)
     pages = processed_pages
-        
+
     all_pages_rows = []
     all_raw_texts = []
-    
+
     # Run candidate comparative selection on Page 1 to determine winning preprocessing strategy
     p1 = pages[0]
     p1_versions = get_preprocessed_images(p1)
-    
+
     # Candidate preprocessing strategies to compare
     candidates = [
         ('scaled_2x', '--psm 6'),
@@ -1700,14 +1811,14 @@ def perform_ocr_sync(content: bytes, is_pdf: bool) -> Dict[str, Any]:
         ('high_contrast', '--psm 6'),
         ('raw_grayscale', '--psm 6'),
     ]
-    
+
     best_ver = 'scaled_2x' if 'scaled_2x' in p1_versions else 'standard_enhanced'
     if best_ver not in p1_versions:
         best_ver = 'raw_grayscale'
     best_config = '--psm 6'
     best_score = -1.0
     best_parsed_p1 = None
-    
+
     for ver_name, config in candidates:
         if ver_name not in p1_versions:
             continue
@@ -1730,9 +1841,9 @@ def perform_ocr_sync(content: bytes, is_pdf: bool) -> Dict[str, Any]:
                 break
         except Exception as e:
             print(f"[OCR Trial] Pass {ver_name} {config} failed: {e}")
-            
+
     print(f"[OCR Pipeline] Selected Best Config: {best_ver} with {best_config} (Score: {best_score})")
-    
+
     # Process all pages with the chosen best configuration parameters
     for idx, page in enumerate(pages):
         if idx == 0 and best_parsed_p1 is not None:
@@ -1748,7 +1859,7 @@ def perform_ocr_sync(content: bytes, is_pdf: bool) -> Dict[str, Any]:
             all_raw_texts.extend(parsed_page.get('all_row_texts', []))
         except Exception as e:
             print(f"[OCR Page Ingestion] Page {idx+1} failed: {e}")
-            
+
     return {
         'header_found': len(all_pages_rows) > 0,
         'raw_rows': all_pages_rows,
@@ -1802,13 +1913,13 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
     if len(content) > 20 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="File too large. Maximum size is 20MB.")
     is_pdf = bool(file.filename and file.filename.lower().endswith(".pdf"))
-    
+
     try:
         loop = asyncio.get_running_loop()
         parsed_result = await loop.run_in_executor(ocr_executor, perform_ocr_sync, content, is_pdf)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-        
+
     if isinstance(parsed_result, str):
         # Convert raw text string to expected dictionary layout format
         text = parsed_result
@@ -1817,8 +1928,12 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
         for idx, line in enumerate(lines_raw):
             match = re.search(r'^(.+?)\s+(\d+)\s+([0-9,]+\.?\d*)\s+([0-9,]+\.?\d*)$', line)
             if match:
+                cand_name = match.group(1).strip()
+                is_sum, _ = is_invoice_summary_row(cand_name, line)
+                if is_sum:
+                    continue
                 raw_rows.append({
-                    'item_name': match.group(1).strip(),
+                    'item_name': cand_name,
                     'quantity': int(match.group(2)),
                     'unit': 'pcs',
                     'unit_price': float(match.group(3).replace(",", "")),
@@ -1833,13 +1948,13 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
             'all_row_texts': lines_raw,
             'raw_text': text
         }
-        
+
     raw_text = str(parsed_result.get('raw_text', ''))
     raw_rows_val = parsed_result.get('raw_rows', [])
     raw_rows = raw_rows_val if isinstance(raw_rows_val, list) else []
     lines_val = parsed_result.get('all_row_texts', [])
     lines = [str(x) for x in lines_val] if isinstance(lines_val, list) else []
-    
+
     # Metadata Regex Extraction rules
     gstin_pattern = re.compile(r"\b([0-9]{2}[\s\-]?[A-Z]{5}[\s\-]?[0-9]{4}[\s\-]?[A-Z]{1}[\s\-]?[1-9A-Z]{1}[\s\-]?[Z2][\s\-]?[0-9A-Z]{1})\b")
     labeled_inv_pattern = re.compile(r"(?i)\b(?:invoice|bill|inv)\b[\s.:\-_]*(?:no\.?|num\.?|number|#|ref|code)[\t :.\-]+[\t ]*([a-zA-Z0-9\-\/]{2,})")
@@ -1857,7 +1972,7 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
     igst_pattern = re.compile(r"(?i)(?:igst|integrated\s*tax|integrated\s*gst)[\t ]*(?:(?:@|at)?[\t ]*\d+(?:\.\d+)?%?)?[\t ]*[:.]?[\t ]*([0-9,]+(?:[.\s:,][0-9]{2})?)")
     discount_pattern = re.compile(r"(?i)(?:discount|disc)[\t ]*[:.]?[\t ]*([0-9,]+(?:[.\s:,][0-9]{2})?)")
     round_off_pattern = re.compile(r"(?i)(?:round\s*off|roundoff)[\t ]*[:.]?[\t ]*([+-]?[0-9,]+(?:[.\s:,][0-9]{2})?)")
-    
+
     def parse_currency_amount(raw_s: Optional[str]) -> Optional[float]:
         if not raw_s:
             return None
@@ -1881,7 +1996,7 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
                 cleaned = cleaned.replace("2Z", "Z")
             if len(cleaned) == 15:
                 supplier_gst = normalize_gstin_ocr(cleaned)
-    
+
     invoice_number = None
     raw_inv_match = ""
     m_inv = labeled_inv_pattern.search(raw_text)
@@ -1898,54 +2013,54 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
         if m_sec and m_sec.group(1).lower() not in ['tax', 'date', 'gst', 'memo', 'bill', 'invoice', 'no', 'number', 'original']:
             raw_inv_match = m_sec.group(0)
             invoice_number = m_sec.group(1).strip()
-    
+
     dt_match = date_pattern.search(raw_text)
     raw_date_match = dt_match.group(0) if dt_match else ""
     invoice_date = dt_match.group(1).strip() if dt_match else None
-    
+
     due_match = due_date_pattern.search(raw_text)
     raw_due_match = due_match.group(0) if due_match else ""
     due_date = due_match.group(1).strip() if due_match else None
-    
+
     po_match = po_pattern.search(raw_text)
     raw_po_match = po_match.group(0) if po_match else ""
     po_number = po_match.group(1).strip() if po_match else None
-    
+
     tot_match = total_pattern.search(raw_text)
     raw_tot_match = tot_match.group(0) if tot_match else ""
     printed_grand_total = parse_currency_amount(tot_match.group(1)) if tot_match else None
-    
+
     sub_match = subtotal_pattern.search(raw_text)
     raw_sub_match = sub_match.group(0) if sub_match else ""
     printed_subtotal = parse_currency_amount(sub_match.group(1)) if sub_match else None
-    
+
     taxable_match = taxable_pattern.search(raw_text)
     taxable_amount = parse_currency_amount(taxable_match.group(1)) if taxable_match else None
-    
+
     tax_match = gst_tax_pattern.search(raw_text)
     gst_tax = parse_currency_amount(tax_match.group(1)) if tax_match else None
-    
+
     cgst_match = cgst_pattern.search(raw_text)
     cgst = parse_currency_amount(cgst_match.group(1)) if cgst_match else None
-    
+
     sgst_match = sgst_pattern.search(raw_text)
     sgst = parse_currency_amount(sgst_match.group(1)) if sgst_match else None
-    
+
     igst_match = igst_pattern.search(raw_text)
     igst = parse_currency_amount(igst_match.group(1)) if igst_match else None
-    
+
     disc_match = discount_pattern.search(raw_text)
     discount = parse_currency_amount(disc_match.group(1)) if disc_match else 0.0
-    
+
     round_match = round_off_pattern.search(raw_text)
     round_off = parse_currency_amount(round_match.group(1)) if round_match else 0.0
-    
+
     # Financial reconciliation adjustments without guessing
     if cgst is not None or sgst is not None or igst is not None:
         component_tax = (cgst or 0.0) + (sgst or 0.0) + (igst or 0.0)
         if gst_tax is None or abs(gst_tax - component_tax) > 0.01:
             gst_tax = component_tax
-    
+
     # Heuristic Supplier Name detection
     supplier_name = None
     raw_supplier_match = ""
@@ -1967,7 +2082,7 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
                 supplier_name = clean_l
                 raw_supplier_match = clean_l
                 break
-                
+
     warnings = []
     if not supplier_gst:
         warnings.append("GSTIN not found or invalid in invoice")
@@ -1977,7 +2092,7 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
         warnings.append("Invoice date not found in invoice")
     if not supplier_name:
         warnings.append("Supplier name not identified in invoice")
-        
+
     # Check for duplicate invoice in database
     is_duplicate = False
     duplicate_info = None
@@ -2001,7 +2116,7 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
                 }
         except Exception as e:
             print(f"[Duplicate Check Warning] {e}")
-            
+
     # Check existing supplier by GSTIN or Name
     supplier_match = None
     if supplier_gst:
@@ -2036,7 +2151,7 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
                 }
         except Exception as e:
             print(f"[Supplier Name Lookup] {e}")
-            
+
     # Confidence scores for metadata
     confidence = {
         "supplier_name": 95 if supplier_name and any(k in raw_text.lower() for k in ["supplier:", "vendor:"]) else (80 if supplier_name else 0),
@@ -2060,7 +2175,7 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
         uncertain_fields.append("invoice_date")
     if printed_grand_total is None or printed_grand_total <= 0:
         uncertain_fields.append("grand_total")
-        
+
     # Reconstruct/merge wrap-around description lines
     final_raw_rows = []
     for r in raw_rows:
@@ -2068,15 +2183,15 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
         qty = r['quantity']
         price = r['unit_price']
         total = r['total']
-        
+
         if not name:
             continue
-            
+
         is_non_comp = any(kw in name.lower() for kw in [
-            "shipping", "delivery", "gst", "cgst", "sgst", "igst", "tax", "discount", "packing", 
+            "shipping", "delivery", "gst", "cgst", "sgst", "igst", "tax", "discount", "packing",
             "courier", "service charge", "round off", "freight", "transport"
         ])
-        
+
         # If it has name and coordinates for quantity/price, or is a charge, it is its own line
         if is_non_comp or qty > 0 or price > 0.0 or total > 0.0:
             final_raw_rows.append(r)
@@ -2087,59 +2202,85 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
                 if 'original_item_name' in final_raw_rows[-1]:
                     final_raw_rows[-1]['original_item_name'] += " " + name
                 final_raw_rows[-1]['confidence_score'] = min(final_raw_rows[-1]['confidence_score'], r['confidence_score'])
-                
+
     # Separate component rows from non-component expense rows
     line_items = []
     excluded_items = []
-    
+
     NON_COMPONENT_KEYWORDS = [
-        "shipping", "delivery", "gst", "cgst", "sgst", "igst", "tax", "discount", 
+        "shipping", "delivery", "gst", "cgst", "sgst", "igst", "tax", "discount",
         "packing", "courier", "service charge", "round off", "round-off", "freight", "transport"
     ]
-    
+
     # Query database components for mapping categories and stocks
     existing_comps = await db_query("SELECT id, name, category, description, total_stock FROM components")
     comp_map = {normalize_name(c["name"]): c for c in existing_comps}
-    
+
     for idx, r in enumerate(final_raw_rows):
         name = r['item_name']
         orig_name = r.get('original_item_name') or name
         row_full_text = r.get('original_row_text', '')
-        
+
         # Clean leading noise characters (like '. ', ': ', '; ', '- ')
         name = re.sub(r'^[.\s,:;_\-]+', '', name).strip()
         orig_name = re.sub(r'^[.\s,:;_\-]+', '', orig_name).strip()
-        
+
         # Skip pure noise rows without any alphanumeric description
         if not re.search(r'[a-zA-Z0-9]', name):
             continue
-        
-        # Skip total summary lines in actual component arrays
-        if any(k in name.lower() or k in row_full_text.lower() for k in [
-            "subtotal", "sub-total", "grand total", "total amount", "amount payable", 
+
+        # Identify and exclude invoice summary/footer rows, preserving extracted values in metadata
+        is_sum, summary_field = is_invoice_summary_row(name, row_full_text)
+        if is_sum or any(k in name.lower() or k in row_full_text.lower() for k in [
+            "subtotal", "sub-total", "grand total", "total amount", "amount payable",
             "net payable", "cgst", "sgst", "igst", "round off", "round-off"
         ]):
-            # Use total summary to verify metadata if not yet found
-            if printed_grand_total is None and any(k in name.lower() or k in row_full_text.lower() for k in ["grand total", "amount payable", "net payable"]):
-                printed_grand_total = r['total']
-            if printed_subtotal is None and "sub" in (name.lower() + row_full_text.lower()):
-                printed_subtotal = r['total']
+            row_amt = r['total'] if (r.get('total') is not None and r['total'] > 0) else r.get('unit_price')
+            if row_amt:
+                if summary_field == "grand_total" or any(k in name.lower() or k in row_full_text.lower() for k in ["grand total", "amount payable", "net payable"]):
+                    if printed_grand_total is None or printed_grand_total == 0.0:
+                        printed_grand_total = row_amt
+                elif summary_field == "subtotal" or "sub" in (name.lower() + row_full_text.lower()):
+                    if printed_subtotal is None or printed_subtotal == 0.0:
+                        printed_subtotal = row_amt
+                elif summary_field == "taxable_amount":
+                    if taxable_amount is None or taxable_amount == 0.0:
+                        taxable_amount = row_amt
+                elif summary_field == "cgst":
+                    if cgst is None or cgst == 0.0:
+                        cgst = row_amt
+                elif summary_field == "sgst":
+                    if sgst is None or sgst == 0.0:
+                        sgst = row_amt
+                elif summary_field == "igst":
+                    if igst is None or igst == 0.0:
+                        igst = row_amt
+                elif summary_field == "gst_tax":
+                    if gst_tax is None or gst_tax == 0.0:
+                        gst_tax = row_amt
+                elif summary_field == "discount":
+                    if discount == 0.0:
+                        discount = row_amt
+                elif summary_field == "round_off":
+                    if round_off == 0.0:
+                        round_off = row_amt
             continue
-            
-        is_excluded = any(kw in name.lower() for kw in NON_COMPONENT_KEYWORDS)
-        
+
+        cleaned_name = clean_item_serial_number(name, idx)
+        is_excluded = any(kw in cleaned_name.lower() for kw in NON_COMPONENT_KEYWORDS)
+
         # Extract HSN if available in row text
         hsn_val = r.get('hsn', '')
         if not hsn_val:
             hsn_match = re.search(r'\b(\d{4,8})\b', r.get('original_row_text', ''))
             if hsn_match:
                 hsn_val = hsn_match.group(1)
-        
+
         # Convert to component row dictionary preserving verbatim description & raw values
         item_dict = {
             "id": f"ocr-item-{idx}",
             "original_item_name": orig_name,
-            "item_name": name,
+            "item_name": cleaned_name,
             "part_number": "",
             "hsn_code": hsn_val,
             "category": "Select Category",
@@ -2160,16 +2301,16 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
             "fields": r.get('fields', {}),
             "accepted_as_new": False
         }
-        
+
         # Run classification and evaluation without overwriting description
         evaluated = await evaluate_line_item(item_dict, comp_map)
-        
+
         if is_excluded:
             evaluated["status"] = "EXCLUDED"
             excluded_items.append(evaluated)
         else:
             line_items.append(evaluated)
-            
+
     # In-memory duplicate name merging
     merged_items = {}
     duplicates_count = 0
@@ -2186,9 +2327,9 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
             duplicates_count += 1
         else:
             merged_items[norm] = item
-            
+
     line_items = list(merged_items.values())
-    
+
     # Financial Cross-check using Decimal Arithmetic
     calc_subtotal_dec = Decimal('0.00')
     for item in line_items:
@@ -2200,28 +2341,28 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
             p_d = to_decimal(item.get("unit_price"))
             if q_d is not None and p_d is not None:
                 calc_subtotal_dec += (q_d * p_d).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-                
+
     calc_charges_dec = Decimal('0.00')
     for item in excluded_items:
         ch_tot = to_decimal(item.get("total")) or Decimal('0.00')
         calc_charges_dec += ch_tot
-        
+
     calc_taxable_dec = calc_subtotal_dec + calc_charges_dec
-    
+
     cgst_d = to_decimal(cgst) or Decimal('0.00')
     sgst_d = to_decimal(sgst) or Decimal('0.00')
     igst_d = to_decimal(igst) or Decimal('0.00')
     tax_d = to_decimal(gst_tax) if gst_tax is not None else (cgst_d + sgst_d + igst_d)
     disc_d = to_decimal(discount) or Decimal('0.00')
     round_d = to_decimal(round_off) or Decimal('0.00')
-    
+
     calc_grand_total_dec = (calc_taxable_dec + tax_d - disc_d + round_d).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
-    
+
     # Financial Discrepancy Checks
     has_discrepancy = False
     discrepancy_amount = 0.0
     discrepancies = []
-    
+
     if printed_grand_total is not None:
         printed_gt_dec = to_decimal(printed_grand_total)
         if printed_gt_dec is not None:
@@ -2232,7 +2373,7 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
                 diff_msg = f"Grand Total Mismatch: Printed invoice states ₹{printed_gt_dec:.2f}, but sum of line items + taxes is ₹{calc_grand_total_dec:.2f} (Difference: ₹{diff:.2f})"
                 discrepancies.append(diff_msg)
                 warnings.append(diff_msg)
-                
+
     if printed_subtotal is not None:
         printed_sub_dec = to_decimal(printed_subtotal)
         if printed_sub_dec is not None:
@@ -2242,10 +2383,10 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
                 diff_sub_msg = f"Subtotal Mismatch: Printed subtotal is ₹{printed_sub_dec:.2f}, while sum of line items is ₹{calc_subtotal_dec:.2f}"
                 discrepancies.append(diff_sub_msg)
                 warnings.append(diff_sub_msg)
-                
+
     if has_discrepancy:
         uncertain_fields.append("financial_discrepancy")
-        
+
     # Structured Field Traces
     field_traces = {
         "supplier_name": {
@@ -2289,7 +2430,7 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
             "warning": discrepancies[0] if discrepancies else (None if printed_grand_total is not None else "Grand total not printed on invoice")
         }
     }
-        
+
     return {
         "success": True,
         "metadata": {
@@ -2306,11 +2447,17 @@ async def purchase_ocr(file: UploadFile = File(...), user=Depends(require_admin)
             "printed_subtotal": printed_subtotal,
             "calculated_subtotal": float(calc_subtotal_dec),
             "taxable_amount": taxable_amount if taxable_amount is not None else float(calc_taxable_dec),
+            "printed_taxable_amount": taxable_amount,
+            "calculated_taxable_amount": float(calc_taxable_dec),
             "discount": discount,
             "gst_tax": gst_tax or float(tax_d),
+            "printed_gst_tax": gst_tax,
             "cgst": cgst or float(cgst_d),
+            "printed_cgst": cgst,
             "sgst": sgst or float(sgst_d),
+            "printed_sgst": sgst,
             "igst": igst or float(igst_d),
+            "printed_igst": igst,
             "round_off": round_off,
             "calculated_total": float(calc_grand_total_dec),
             "has_discrepancy": has_discrepancy,
@@ -2352,24 +2499,24 @@ async def verify_purchase(req: PurchaseVerifyRequest, user=Depends(require_facul
         )
     existing_comps = await db_query("SELECT id, name, category, description, total_stock FROM components")
     comp_map = {normalize_name(c["name"]): c for c in existing_comps}
-    
+
     updated_items = []
     new_count = 0
     existing_count = 0
     total_stock_to_add = 0
-    
+
     for item in req.line_items:
         # Re-evaluate database matches with modified row values
         evaluated = await evaluate_line_item(item, comp_map)
-        
+
         if evaluated["is_existing"]:
             existing_count += 1
         else:
             new_count += 1
-            
+
         total_stock_to_add += evaluated.get("quantity", 0)
         updated_items.append(evaluated)
-        
+
     return {
         "success": True,
         "line_items": updated_items,
@@ -2397,7 +2544,7 @@ async def confirm_purchase(req: PurchaseConfirmRequest, user=Depends(require_adm
         )
     if not req.line_items:
         raise HTTPException(status_code=400, detail="No line items provided")
-        
+
     invoice_ref = (req.metadata.get("invoice_number") or "").strip()
     supplier = (req.metadata.get("supplier_name") or "").strip()
     supplier_gst = (req.metadata.get("supplier_gst") or "").strip()
@@ -2414,7 +2561,7 @@ async def confirm_purchase(req: PurchaseConfirmRequest, user=Depends(require_adm
             status_code=400,
             detail="Cannot confirm: A valid supplier name is required. Please verify or enter manually."
         )
-    
+
     # Duplicate Invoice Validation
     if not allow_duplicate and invoice_ref:
         try:
@@ -2442,9 +2589,15 @@ async def confirm_purchase(req: PurchaseConfirmRequest, user=Depends(require_adm
         price = float(item.get("unit_price", 0.0))
         category = item.get("category", "").strip()
         status = item.get("status", "")
-        
+
         if not name:
             raise HTTPException(status_code=400, detail="Cannot confirm: Missing component name")
+        is_sum, _ = is_invoice_summary_row(name)
+        if is_sum:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot confirm: '{name}' is an invoice summary row and cannot be saved as an inventory component."
+            )
         if qty <= 0:
             raise HTTPException(status_code=400, detail=f"Cannot confirm: Invalid quantity for component '{name}'")
         if price < 0:
@@ -2453,21 +2606,21 @@ async def confirm_purchase(req: PurchaseConfirmRequest, user=Depends(require_adm
             raise HTTPException(status_code=400, detail=f"Cannot confirm: Category selection required for component '{name}'")
         if "POSSIBLE MATCH" in status:
             raise HTTPException(status_code=400, detail=f"Cannot confirm: Unresolved database match for component '{name}'")
-            
+
     queries = []
     args = []
-    
+
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
     po_num = req.metadata.get("po_number") or invoice_ref
-    
+
     imported = 0
     updated = 0
     stock_units_added = 0
-    
+
     existing_comps = await db_query("SELECT id, name, category, total_stock, available_stock FROM components")
     comp_map = {normalize_name(c["name"]): c for c in existing_comps}
-    
+
     # 1. Structured Purchase Invoice Header Record
     inv_id = "inv-" + str(uuid.uuid4())[:8]
     subtotal_val = float(req.metadata.get("subtotal") or 0.0)
@@ -2481,7 +2634,7 @@ async def confirm_purchase(req: PurchaseConfirmRequest, user=Depends(require_adm
     round_off_val = float(req.metadata.get("round_off") or 0.0)
     inv_date = req.metadata.get("invoice_date") or now[:10]
     due_date = req.metadata.get("due_date") or ""
-    
+
     queries.append(
         """INSERT INTO purchase_invoices (id, invoice_number, invoice_date, due_date, po_number, supplier_id, supplier_name, supplier_gstin, subtotal, taxable_amount, cgst, sgst, igst, total_tax, discount, round_off, grand_total, items_count, total_units, status, created_by, created_by_name, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', ?, ?, ?, ?)"""
@@ -2511,7 +2664,7 @@ async def confirm_purchase(req: PurchaseConfirmRequest, user=Depends(require_adm
         now,
         now
     ])
-    
+
     for item in req.line_items:
         name = item.get("item_name", "").strip()
         qty = int(item.get("quantity", 0))
@@ -2525,11 +2678,11 @@ async def confirm_purchase(req: PurchaseConfirmRequest, user=Depends(require_adm
         part_number = item.get("part_number") or item.get("item_code") or ""
         discount = float(item.get("discount") or 0.0)
         item_total = float(item.get("total") or (qty * price))
-        
+
         norm = normalize_name(name)
         po_id = "po-" + str(uuid.uuid4())[:8]
         full_desc = f"{desc_val} | [Imported Metadata] Features: {features} | Price: {price} | Status: {status}"
-        
+
         # Match database components for final verification
         matched_db_comp = None
         if norm in comp_map:
@@ -2539,14 +2692,14 @@ async def confirm_purchase(req: PurchaseConfirmRequest, user=Depends(require_adm
                 if db_c["name"].lower().strip() == name.lower().strip():
                     matched_db_comp = db_c
                     break
-                    
+
         if matched_db_comp:
             comp_id = matched_db_comp["id"]
             new_tot = matched_db_comp["total_stock"] + qty
             new_avail = matched_db_comp["available_stock"] + qty
-            
+
             queries.append(
-                """UPDATE components SET 
+                """UPDATE components SET
                    total_stock = ?, available_stock = ?, description = ?, category = ?, updated_at = ?
                    WHERE id = ?"""
             )
@@ -2560,7 +2713,7 @@ async def confirm_purchase(req: PurchaseConfirmRequest, user=Depends(require_adm
             )
             args.append([comp_id, name, category, full_desc, qty, qty, "Lab A", unit, now, now])
             imported += 1
-            
+
         # 2. Structured Line Item Record
         pii_id = "pii-" + str(uuid.uuid4())[:8]
         queries.append(
@@ -2586,7 +2739,7 @@ async def confirm_purchase(req: PurchaseConfirmRequest, user=Depends(require_adm
             item_total,
             now
         ])
-            
+
         # 3. Individual Purchase Orders Record for audit and reporting
         queries.append(
             """INSERT INTO purchase_orders (id, po_number, supplier_name, component_id, component_name, component_category, quantity, unit_cost, total_cost, purchased_by, purchased_by_name, invoice_ref, status, created_at, purchased_at)
@@ -2609,18 +2762,18 @@ async def confirm_purchase(req: PurchaseConfirmRequest, user=Depends(require_adm
             now
         ])
         stock_units_added += qty
-        
+
     try:
         from app.main import Statement
         statements = [Statement(q, a) for q, a in zip(queries, args)]
         await db_batch(statements)
-        
+
         try:
             from app.main import COMPONENTS_CACHE
             await COMPONENTS_CACHE.clear()
         except Exception:
             pass
-            
+
         await log_activity(
             user_id=user.get("uid", "system"),
             user_name=user.get("name", "System"),
@@ -2629,7 +2782,7 @@ async def confirm_purchase(req: PurchaseConfirmRequest, user=Depends(require_adm
             entity_id=invoice_ref,
             details={"invoice": invoice_ref, "supplier": supplier, "items_count": len(req.line_items)}
         )
-        
+
         return {
             "success": True,
             "invoice_id": inv_id,

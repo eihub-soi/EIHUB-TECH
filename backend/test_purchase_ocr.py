@@ -28,7 +28,7 @@ class TestPurchaseOCR(unittest.TestCase):
         app.dependency_overrides[require_admin] = lambda: self.mock_user
         app.dependency_overrides[require_faculty_or_admin] = lambda: self.mock_user
         app.dependency_overrides[get_current_user] = lambda: self.mock_user
-        
+
     def tearDown(self):
         app.dependency_overrides.clear()
 
@@ -53,17 +53,17 @@ class TestPurchaseOCR(unittest.TestCase):
             "GST: 1,530.00\n"
             "Grand Total: 10,030.00\n"
         )
-        
+
         # Mock empty DB to represent all components as NEW
         mock_db_query.return_value = []
-        
+
         file = {"file": ("invoice.png", io.BytesIO(b"dummy image data"), "image/png")}
         response = self.client.post("/api/imports/purchase/ocr", files=file)
-        
+
         self.assertEqual(response.status_code, 200)
         res_json = response.json()
         self.assertTrue(res_json["success"])
-        
+
         # Check metadata extraction
         meta = res_json["metadata"]
         self.assertEqual(meta["supplier_name"], "ABC Electronics Ltd")
@@ -72,16 +72,16 @@ class TestPurchaseOCR(unittest.TestCase):
         self.assertEqual(meta["invoice_date"], "21/08/2026")
         self.assertEqual(meta["grand_total"], 10030.0)
         self.assertEqual(meta["subtotal"], 8500.0)
-        
+
         # Check line items and duplicate merging (15 total Arduino Uno)
         line_items = res_json["line_items"]
         self.assertEqual(len(line_items), 2) # Arduino Uno merged, ESP32 DevKit
-        
+
         arduino_item = next(item for item in line_items if item["item_name"].lower() == "arduino uno board")
         self.assertEqual(arduino_item["quantity"], 15)
         self.assertEqual(arduino_item["total"], 6750.0)
         self.assertEqual(arduino_item["status"], "✓ VERIFIED NEW")
-        
+
         # Check auto-excluded courier charge
         excluded = res_json["excluded_items"]
         self.assertEqual(len(excluded), 1)
@@ -99,7 +99,7 @@ class TestPurchaseOCR(unittest.TestCase):
                 "total_stock": 20
             }
         ]
-        
+
         payload = {
             "metadata": {
                 "supplier_name": "ABC Electronics",
@@ -120,20 +120,20 @@ class TestPurchaseOCR(unittest.TestCase):
                 }
             ]
         }
-        
+
         response = self.client.post("/api/imports/purchase/verify", json=payload)
         self.assertEqual(response.status_code, 200)
         res_json = response.json()
-        
+
         # Verify component matched classifications and stock adjustments
         items = res_json["line_items"]
         self.assertEqual(len(items), 2)
-        
+
         arduino = next(i for i in items if i["item_name"] == "Arduino Uno Board")
         self.assertEqual(arduino["status"], "✓ VERIFIED EXISTING")
         self.assertEqual(arduino["old_stock"], 20)
         self.assertEqual(arduino["new_stock"], 30)
-        
+
         pi = next(i for i in items if i["item_name"] == "Raspberry Pi 4")
         self.assertEqual(pi["status"], "✓ VERIFIED NEW")
         self.assertEqual(pi["old_stock"], 0)
@@ -153,7 +153,7 @@ class TestPurchaseOCR(unittest.TestCase):
                 "available_stock": 8
             }
         ]
-        
+
         payload = {
             "metadata": {
                 "supplier_name": "ABC Electronics",
@@ -176,36 +176,36 @@ class TestPurchaseOCR(unittest.TestCase):
                 }
             ]
         }
-        
+
         response = self.client.post("/api/imports/purchase/confirm", json=payload)
         self.assertEqual(response.status_code, 200)
         res_json = response.json()
         self.assertTrue(res_json["success"])
-        
+
         # Verify batched SQL executions (1 Invoice Insert, 1 Comp Update, 1 Comp Insert, 2 Invoice Item Inserts, 2 PO Inserts)
         self.assertTrue(mock_batch.called)
         statements = mock_batch.call_args[0][0]
         self.assertEqual(len(statements), 7)
-        
+
         # Verify purchase_invoices insert
         inv_inserts = [s for s in statements if "INSERT INTO purchase_invoices" in s.sql]
         self.assertEqual(len(inv_inserts), 1)
         self.assertEqual(inv_inserts[0].args[1], "INV-2026-9876")
-        
+
         # Verify purchase_invoice_items inserts
         item_inserts = [s for s in statements if "INSERT INTO purchase_invoice_items" in s.sql]
         self.assertEqual(len(item_inserts), 2)
-        
+
         # Find update stock query
         update_comp_stmt = next(s for s in statements if "UPDATE components" in s.sql)
         # Verify totals incremented: 10 old + 5 new = 15 total, 8 old + 5 new = 13 available
         self.assertEqual(update_comp_stmt.args[0], 15) # new total_stock
         self.assertEqual(update_comp_stmt.args[1], 13) # new available_stock
-        
+
         # Find inserts purchase orders queries
         po_inserts = [s for s in statements if "INSERT INTO purchase_orders" in s.sql]
         self.assertEqual(len(po_inserts), 2)
-        
+
         # Verify invoice reference and PO reference mappings are saved
         self.assertEqual(po_inserts[0].args[1], "PO-12345")
         self.assertEqual(po_inserts[0].args[11], "INV-2026-9876")
@@ -237,7 +237,7 @@ class TestPurchaseOCR(unittest.TestCase):
 
     def test_parse_ocr_coordinates(self):
         from app.api.routes.import_data import parse_ocr_coordinates
-        
+
         # Construct raw coordinate mock
         raw_data = {
             'text': ["Description", "Qty", "Rate", "Amount", "Arduino", "Uno", "10", "450.00", "4,500.00"],
@@ -247,13 +247,13 @@ class TestPurchaseOCR(unittest.TestCase):
             'height': [15, 15, 15, 15, 12, 12, 12, 12, 12],
             'conf': [95.0] * 9
         }
-        
+
         parsed = parse_ocr_coordinates(raw_data)
         self.assertTrue(parsed['header_found'])
-        
+
         raw_rows = parsed['raw_rows']
         self.assertEqual(len(raw_rows), 1)
-        
+
         row = raw_rows[0]
         self.assertEqual(row['item_name'], "Arduino Uno")
         self.assertEqual(row['quantity'], 10)
@@ -262,24 +262,24 @@ class TestPurchaseOCR(unittest.TestCase):
 
     def test_determine_category(self):
         from app.api.routes.import_data import determine_category
-        
+
         # Priority 1: Invoice category
         self.assertEqual(determine_category("Some Component", "Sensors", "Microcontrollers"), "Sensors")
-        
+
         # Priority 2: Existing DB category
         self.assertEqual(determine_category("Some Component", "Electronics", "Sensors"), "Sensors")
         self.assertEqual(determine_category("Some Component", "", "Sensors"), "Sensors")
-        
+
         # Priority 3: Known mappings
         self.assertEqual(determine_category("Arduino Board R3", "Electronics", ""), "Microcontrollers")
         self.assertEqual(determine_category("HC-SR04 Sensor", "", "Electronics"), "Sensors")
-        
+
         # Priority 4: Selection required
         self.assertEqual(determine_category("Unknown Widget", "Electronics", "Select Category"), "Select Category")
 
     def test_fuzzy_match_recommendations(self):
         from app.api.routes.import_data import evaluate_line_item, normalize_name
-        
+
         comp_map = {
             normalize_name("Arduino Uno Board"): {
                 "id": "db-arduino-id",
@@ -288,7 +288,7 @@ class TestPurchaseOCR(unittest.TestCase):
                 "total_stock": 10
             }
         }
-        
+
         # Test Case 1: Exact Match
         item1 = {
             "item_name": "arduino uno board",
@@ -301,7 +301,7 @@ class TestPurchaseOCR(unittest.TestCase):
         eval1 = asyncio.run(evaluate_line_item(item1, comp_map))
         self.assertEqual(eval1["status"], "✓ VERIFIED EXISTING")
         self.assertEqual(eval1["existing_id"], "db-arduino-id")
-        
+
         # Test Case 2: Fuzzy possible match (Arduino Uno Board V3 vs Arduino Uno Board)
         item2 = {
             "item_name": "Arduino Uno Board V3",
@@ -315,7 +315,7 @@ class TestPurchaseOCR(unittest.TestCase):
         self.assertEqual(eval2["status"], "⚠ POSSIBLE MATCH")
         self.assertIsNotNone(eval2["possible_match"])
         self.assertEqual(eval2["possible_match"]["name"], "Arduino Uno Board")
-        
+
         # Test Case 3: Fuzzy match resolved by accepting as new
         item3 = {
             "item_name": "Arduino Uno Board V3",
@@ -340,7 +340,7 @@ class TestPurchaseOCR(unittest.TestCase):
         file = {"file": ("invoice.png", io.BytesIO(b"dummy image data"), "image/png")}
         response = self.client.post("/api/imports/purchase/ocr", files=file)
         self.assertEqual(response.status_code, 200)
-        
+
         # Non-admin (faculty/student) is denied
         self.mock_user["role"] = "faculty"
         response = self.client.post("/api/imports/purchase/ocr", files=file)
@@ -439,7 +439,7 @@ class TestPurchaseOCR(unittest.TestCase):
     @patch("app.api.routes.import_data.log_activity")
     def test_purchase_confirm_40_plus_line_items(self, mock_log, mock_batch, mock_db_query):
         mock_db_query.return_value = []
-        
+
         # Construct 45 line items
         items = []
         for i in range(1, 46):
@@ -451,7 +451,7 @@ class TestPurchaseOCR(unittest.TestCase):
                 "unit_price": 25.0,
                 "category": "Passives"
             })
-            
+
         payload = {
             "metadata": {
                 "supplier_name": "Bulk Electronics Corp",
@@ -461,18 +461,83 @@ class TestPurchaseOCR(unittest.TestCase):
             },
             "line_items": items
         }
-        
+
         response = self.client.post("/api/imports/purchase/confirm", json=payload)
         self.assertEqual(response.status_code, 200)
         res = response.json()
         self.assertTrue(res["success"])
         self.assertEqual(res["metrics"]["imported"], 45)
         self.assertEqual(res["metrics"]["stock_units_added"], sum(range(1, 46)))
-        
+
         # Verify batched SQL executions: 1 invoice + 45 component inserts + 45 invoice item inserts + 45 PO inserts = 136 statements
         self.assertTrue(mock_batch.called)
         statements = mock_batch.call_args[0][0]
         self.assertEqual(len(statements), 1 + 45 * 3)
+
+    def test_clean_item_serial_numbers(self):
+        """Verify leading serial numbers are removed while product model numbers are preserved."""
+        from app.api.routes.import_data import clean_item_serial_number
+
+        # User specified examples
+        self.assertEqual(clean_item_serial_number("7 SENSOR MODULE", 6), "SENSOR MODULE")
+        self.assertEqual(clean_item_serial_number("8 18650 - 1 CELL HOLDER", 7), "18650 - 1 CELL HOLDER")
+        self.assertEqual(clean_item_serial_number("9 SWITCH", 8), "SWITCH")
+        self.assertEqual(clean_item_serial_number("10 RGB LED (4 TERMINALS)", 9), "RGB LED (4 TERMINALS)")
+
+        # Preservation of model numbers and specifications
+        self.assertEqual(clean_item_serial_number("18650 - 1 CELL HOLDER", 0), "18650 - 1 CELL HOLDER")
+        self.assertEqual(clean_item_serial_number("1N4007 RECTIFIER DIODE", 0), "1N4007 RECTIFIER DIODE")
+        self.assertEqual(clean_item_serial_number("7805 VOLTAGE REGULATOR", 0), "7805 VOLTAGE REGULATOR")
+        self.assertEqual(clean_item_serial_number("NE555P PRECISION TIMER", 0), "NE555P PRECISION TIMER")
+        self.assertEqual(clean_item_serial_number("8 CHANNEL RELAY MODULE", 0), "8 CHANNEL RELAY MODULE")
+        self.assertEqual(clean_item_serial_number("8 8 CHANNEL RELAY MODULE", 7), "8 CHANNEL RELAY MODULE")
+        self.assertEqual(clean_item_serial_number("1. CAPACITOR 100uF", 0), "CAPACITOR 100uF")
+
+    def test_summary_rows_detection_and_exclusion(self):
+        """Verify summary and tax footer rows are identified and never treated as product items."""
+        from app.api.routes.import_data import is_invoice_summary_row
+
+        summary_labels = [
+            "Total", "TOTAL", "Total Amount", "Grand Total", "Sub Total", "SubTotal",
+            "Taxable Amount", "Taxable Value", "CGST", "CGST @ 9%", "SGST", "SGST 9%",
+            "IGST", "IGST 18%", "Discount", "Additional Discount", "Round Off",
+            "Invoice Amount", "Net Payable", "Amount in Words"
+        ]
+        for label in summary_labels:
+            is_sum, field_type = is_invoice_summary_row(label, label)
+            self.assertTrue(is_sum, f"Failed to identify summary row for: {label}")
+
+        # Genuine items should not be identified as summary rows
+        genuine_items = [
+            "SENSOR MODULE", "18650 - 1 CELL HOLDER", "SWITCH", "RGB LED (4 TERMINALS)",
+            "NE555P TIMER IC", "LM7805CT REGULATOR", "1N4007 DIODE", "TOTAL STATION CABLE"
+        ]
+        for item in genuine_items:
+            is_sum, _ = is_invoice_summary_row(item, item)
+            self.assertFalse(is_sum, f"Incorrectly identified genuine item as summary row: {item}")
+
+    @patch("app.api.routes.import_data.db_query")
+    def test_confirm_rejects_summary_row(self, mock_db_query):
+        """Verify confirm_purchase rejects any attempt to confirm a summary row as an inventory item."""
+        mock_db_query.return_value = []
+        payload = {
+            "metadata": {
+                "supplier_name": "ABC Electronics",
+                "invoice_number": "INV-SUM-101",
+                "grand_total": 5000.0
+            },
+            "line_items": [
+                {
+                    "item_name": "Grand Total",
+                    "quantity": 1,
+                    "unit_price": 5000.0,
+                    "category": "Electronics"
+                }
+            ]
+        }
+        response = self.client.post("/api/imports/purchase/confirm", json=payload)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("summary row", response.json()["detail"].lower())
 
 if __name__ == "__main__":
     unittest.main()
