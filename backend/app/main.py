@@ -13,6 +13,7 @@ import base64
 import hashlib
 import hmac
 import secrets
+import ipaddress
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta, date
 from typing import Optional, List, Dict, Any
@@ -99,7 +100,7 @@ db_lock: Optional[asyncio.Lock] = None
 google_keys_lock: Optional[asyncio.Lock] = None
 
 # Rate limiting settings
-RATE_LIMIT_REQUESTS = defaultdict(list)
+RATE_LIMIT_REQUESTS: Dict[str, Dict[str, Any]] = {}
 RATE_LIMIT_MAX_REQUESTS = 100  # Max requests per window
 RATE_LIMIT_WINDOW = 60         # Window size in seconds
 _LAST_RATE_LIMIT_CLEANUP = 0.0
@@ -111,49 +112,506 @@ def prune_expired_rate_limits():
     if now - _LAST_RATE_LIMIT_CLEANUP < 60:
         return
     _LAST_RATE_LIMIT_CLEANUP = now
-    ips = list(RATE_LIMIT_REQUESTS.keys())
-    for ip in ips:
-        ts = RATE_LIMIT_REQUESTS.get(ip, [])
-        valid_ts = [t for t in ts if now - t < RATE_LIMIT_WINDOW]
-        if not valid_ts:
-            RATE_LIMIT_REQUESTS.pop(ip, None)
-        else:
-            RATE_LIMIT_REQUESTS[ip] = valid_ts
+    expired = [k for k, v in list(RATE_LIMIT_REQUESTS.items()) if now >= v.get("expires_at", 0)]
+    for k in expired:
+        RATE_LIMIT_REQUESTS.pop(k, None)
+
+
+# ----------------------------------------------------
+# TRUSTED PROXIES & SECURE IP EXTRACTION HELPERS
+# ----------------------------------------------------
+
+def get_trusted_proxy_networks() -> List[Any]:
+    """
+    Returns list of trusted proxy networks.
+
+    SECURITY POLICY:
+    RFC 1918 private networks (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) and link-local
+    (169.254.0.0/16) are NOT automatically trusted because multi-tenant cloud platforms (like Render)
+    do not guarantee that all traffic from private ranges originates from a trusted reverse proxy.
+    Only local loopback addresses (127.0.0.0/8, ::1/128) are trusted by default.
+    All reverse proxies MUST be explicitly specified via the TRUSTED_PROXIES environment variable
+    as a comma-separated list of CIDR blocks (e.g. TRUSTED_PROXIES="10.0.1.0/24,198.51.100.10/32").
+    """
+    networks = [
+        ipaddress.ip_network("127.0.0.0/8"),
+        ipaddress.ip_network("::1/128"),
+    ]
+    custom = os.environ.get("TRUSTED_PROXIES")
+    if custom:
+        for cidr in custom.split(","):
+            c = cidr.strip()
+            if c:
+                try:
+                    networks.append(ipaddress.ip_network(c, strict=False))
+                except ValueError:
+                    pass
+    return networks
+
+
+def is_trusted_proxy(ip_str: str) -> bool:
+    """Returns True if the IP string is a recognized trusted reverse proxy or local test runner."""
+    if not ip_str:
+        return False
+    clean = ip_str.strip()
+    if clean in ("testclient", "localhost"):
+        return True
+    try:
+        addr = ipaddress.ip_address(clean)
+        for net in get_trusted_proxy_networks():
+            if addr in net:
+                return True
+        return False
+    except ValueError:
+        return False
+
+
+def is_valid_client_ip(ip_str: str) -> bool:
+    """Validate that an extracted IP string is a valid IPv4/IPv6 address or recognized local test host."""
+    if not ip_str or not isinstance(ip_str, str):
+        return False
+    clean = ip_str.strip()
+    if clean in ("testclient", "localhost", "127.0.0.1", "::1", "unknown"):
+        return True
+    if ":" in clean and clean.count(":") == 1:
+        clean = clean.split(":")[0].strip()
+    try:
+        ipaddress.ip_address(clean)
+        return True
+    except ValueError:
+        return False
 
 
 # Distributed Upstash Redis Rate Limiting Helper
+LUA_RATE_LIMIT_SCRIPT = (
+    "local current = redis.call('INCR', KEYS[1])\n"
+    "if current == 1 then\n"
+    "  local ok = redis.call('EXPIRE', KEYS[1], ARGV[1])\n"
+    "  if ok ~= 1 then return redis.error_reply('EXPIRE_FAILED') end\n"
+    "end\n"
+    "return current"
+)
+
 async def check_redis_rate_limit(key: str, limit: int, window: int) -> Optional[bool]:
     """
     Checks rate limit using Upstash Redis REST API.
-    Returns True if ALLOWED, False if EXCEEDED, or None if Redis is not configured/unreachable.
+    Enforces atomic fixed-window-from-first-request counter with confirmed expiry.
+    By default, executes an atomic Lua script that increments the counter and sets
+    expiry ONLY on the first increment (when count == 1), preventing window extension
+    on subsequent requests without requiring any optional environment flags.
+    Treats EXPIRE result 1 as success; treats result 0, null, missing, malformed,
+    or error responses as failure, safely activating the documented in-memory fallback.
+
+    Returns:
+      True  -> ALLOWED (current_count <= limit)
+      False -> EXCEEDED (current_count > limit, triggers HTTP 429)
+      None  -> FALLBACK TO IN-MEMORY LIMIT (unconfigured, unreachable, timeout, or malformed)
     """
     upstash_url = os.environ.get("UPSTASH_REDIS_REST_URL")
     upstash_token = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
-    
-    if upstash_url and upstash_token:
-        try:
-            redis_key = f"rate:{key}"
-            headers = {"Authorization": f"Bearer {upstash_token}"}
-            async with httpx.AsyncClient(timeout=3.0) as http_c:
-                resp = await http_c.post(
-                    f"{upstash_url.rstrip('/')}/pipeline",
-                    headers=headers,
-                    json=[
-                        ["INCR", redis_key],
-                        ["EXPIRE", redis_key, window]
-                    ]
-                )
-                if resp.status_code == 200:
+
+    if not (upstash_url and upstash_token):
+        return None
+
+    try:
+        redis_key = f"rate:{key}"
+        headers = {
+            "Authorization": f"Bearer {upstash_token}",
+            "Content-Type": "application/json"
+        }
+
+        # Default atomic Lua script: increments counter and sets expiry only on first increment
+        pipeline_cmd = [["EVAL", LUA_RATE_LIMIT_SCRIPT, 1, redis_key, str(window)]]
+
+        async with httpx.AsyncClient(timeout=3.0) as http_c:
+            resp = await http_c.post(
+                f"{upstash_url.rstrip('/')}/pipeline",
+                headers=headers,
+                json=pipeline_cmd
+            )
+            if resp.status_code == 200:
+                try:
                     res_data = resp.json()
-                    if isinstance(res_data, list) and len(res_data) > 0:
-                        current_count = res_data[0].get("result", 1)
-                        if isinstance(current_count, int) and current_count > limit:
-                            return False
-                        return True
-        except Exception as e:
-            print(f"[Redis Rate Limit Warning] Distributed query failed: {e}. Falling back to memory limit.")
-            return None
-    return None
+                except Exception as json_err:
+                    print(f"[Redis Rate Limit Warning] JSON parse failure: {json_err}. Falling back to memory limit.")
+                    return None
+
+                if not isinstance(res_data, list) or len(res_data) == 0:
+                    print(f"[Redis Rate Limit Warning] Empty or non-list Redis pipeline response: {res_data}. Falling back to memory limit.")
+                    return None
+
+                # 1. Single-command response (atomic Lua script default)
+                if len(res_data) == 1:
+                    first = res_data[0]
+                    if isinstance(first, dict):
+                        if "error" in first:
+                            print(f"[Redis Rate Limit Warning] Redis Lua script error: {first.get('error')}. Falling back to memory limit.")
+                            return None
+                        val = first.get("result")
+                        if isinstance(val, int):
+                            return val <= limit
+                    elif isinstance(first, int):
+                        return first <= limit
+                    print(f"[Redis Rate Limit Warning] Malformed Lua result: {first}. Falling back to memory limit.")
+                    return None
+
+                # 2. Multi-command response (two-operation pipeline fallback/testing)
+                res_incr = res_data[0]
+                res_expire = res_data[1]
+
+                # Validate INCR result
+                current_count = None
+                if isinstance(res_incr, dict):
+                    if "error" in res_incr:
+                        print(f"[Redis Rate Limit Warning] Redis INCR error: {res_incr.get('error')}. Falling back to memory limit.")
+                        return None
+                    val = res_incr.get("result")
+                    if isinstance(val, int):
+                        current_count = val
+                elif isinstance(res_incr, int):
+                    current_count = res_incr
+
+                if current_count is None:
+                    print(f"[Redis Rate Limit Warning] Malformed INCR result: {res_incr}. Falling back to memory limit.")
+                    return None
+
+                # Validate EXPIRE result: MUST strictly be 1 (success).
+                # 0 (key missing/not set), None, missing, or error response is treated as failure.
+                exp_val = None
+                if isinstance(res_expire, dict):
+                    if "error" in res_expire:
+                        print(f"[Redis Rate Limit Warning] Redis EXPIRE error: {res_expire.get('error')}. Falling back to memory limit.")
+                        return None
+                    exp_val = res_expire.get("result")
+                elif isinstance(res_expire, int):
+                    exp_val = res_expire
+
+                if exp_val != 1:
+                    print(f"[Redis Rate Limit Warning] Redis EXPIRE unconfirmed (result={exp_val}). Falling back to memory limit.")
+                    return None
+
+                return current_count <= limit
+            elif resp.status_code in (401, 403):
+                print(f"[Redis Rate Limit Warning] Upstash authentication failure (HTTP {resp.status_code}). Falling back to memory limit.")
+                return None
+            else:
+                print(f"[Redis Rate Limit Warning] Upstash returned status {resp.status_code}. Falling back to memory limit.")
+                return None
+    except httpx.TimeoutException:
+        print("[Redis Rate Limit Warning] Upstash Redis request timed out (>3.0s). Falling back to memory limit.")
+        return None
+    except httpx.ConnectError as conn_err:
+        print(f"[Redis Rate Limit Warning] Upstash Redis connection failed: {conn_err}. Falling back to memory limit.")
+        return None
+    except Exception as e:
+        print(f"[Redis Rate Limit Warning] Distributed query failed: {e}. Falling back to memory limit.")
+        return None
+
+
+async def check_redis_operational_health() -> Dict[str, Any]:
+    """
+    Checks Upstash Redis operational health without exposing credentials or internal connection details.
+    Distinguishes configured, reachable and operational states with strict response structure and type validation.
+    """
+    upstash_url = os.environ.get("UPSTASH_REDIS_REST_URL")
+    upstash_token = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
+
+    is_configured = bool(upstash_url and upstash_token)
+    if not is_configured:
+        return {
+            "configured": False,
+            "reachable": False,
+            "operational": False,
+            "mode": "local_in_memory_fixed_window",
+            "distributed": False,
+            "fallback_active": True,
+            "security_warning": "Running single-instance in-memory rate limiting. Distributed multi-instance protection requires Upstash Redis."
+        }
+
+    try:
+        headers = {
+            "Authorization": f"Bearer {upstash_token}",
+            "Content-Type": "application/json"
+        }
+        async with httpx.AsyncClient(timeout=2.0) as http_c:
+            resp = await http_c.post(
+                f"{upstash_url.rstrip('/')}/pipeline",
+                headers=headers,
+                json=[["PING"]]
+            )
+            if resp.status_code == 200:
+                try:
+                    res_data = resp.json()
+                except Exception:
+                    res_data = None
+
+                # Strict structure and type validation on PING response:
+                # Must be a non-empty list of exactly 1 item, which is a dict with no error,
+                # and its result must strictly be string "PONG"
+                if (
+                    isinstance(res_data, list)
+                    and len(res_data) == 1
+                    and isinstance(res_data[0], dict)
+                    and "error" not in res_data[0]
+                    and res_data[0].get("result") == "PONG"
+                    and isinstance(res_data[0].get("result"), str)
+                ):
+                    return {
+                        "configured": True,
+                        "reachable": True,
+                        "operational": True,
+                        "mode": "distributed_redis",
+                        "distributed": True,
+                        "fallback_active": False
+                    }
+                else:
+                    return {
+                        "configured": True,
+                        "reachable": True,
+                        "operational": False,
+                        "mode": "local_in_memory_fixed_window",
+                        "distributed": False,
+                        "fallback_active": True,
+                        "reason": "malformed_ping_response",
+                        "security_warning": "Redis reachable but returned unexpected response. Falling back to in-memory limiting."
+                    }
+            elif resp.status_code in (401, 403):
+                return {
+                    "configured": True,
+                    "reachable": True,
+                    "operational": False,
+                    "mode": "local_in_memory_fixed_window",
+                    "distributed": False,
+                    "fallback_active": True,
+                    "reason": "authentication_failed",
+                    "security_warning": "Redis authentication failed. Falling back to in-memory limiting."
+                }
+            else:
+                return {
+                    "configured": True,
+                    "reachable": True,
+                    "operational": False,
+                    "mode": "local_in_memory_fixed_window",
+                    "distributed": False,
+                    "fallback_active": True,
+                    "reason": f"http_status_{resp.status_code}",
+                    "security_warning": f"Redis returned HTTP {resp.status_code}. Falling back to in-memory limiting."
+                }
+    except httpx.TimeoutException:
+        return {
+            "configured": True,
+            "reachable": False,
+            "operational": False,
+            "mode": "local_in_memory_fixed_window",
+            "distributed": False,
+            "fallback_active": True,
+            "reason": "timeout",
+            "security_warning": "Redis connection timed out (>2.0s). Falling back to in-memory limiting."
+        }
+    except Exception:
+        return {
+            "configured": True,
+            "reachable": False,
+            "operational": False,
+            "mode": "local_in_memory_fixed_window",
+            "distributed": False,
+            "fallback_active": True,
+            "reason": "connection_error",
+            "security_warning": "Redis connection failed. Falling back to in-memory limiting."
+        }
+
+
+class RateLimiter:
+    """
+    Production-Grade Rate Limiter:
+    - Algorithm: Fixed-Window Counter (Window from First Request).
+    - Consistent rate-limit semantics between distributed Redis and local in-memory fallback.
+    - Lifecycle:
+        1. A client's window starts upon their first request within an inactive/expired window.
+        2. Window duration is `window` seconds. Exactly `limit` requests are accepted.
+        3. Request (limit + 1) and any subsequent requests during the active window return HTTP 429
+           with a 'Retry-After' header indicating the remaining seconds in the window.
+        4. When now >= expires_at, the window boundary resets: counter returns to 0 and requests are allowed.
+    - Strict trusted-proxy IP extraction preventing origin header spoofing.
+    - Production-safe immutable policy enforcement.
+
+    SECURITY NOTICE ON IN-MEMORY FALLBACK:
+    In-memory rate limiting operates on a per-process fixed-window counter (`RATE_LIMIT_REQUESTS`).
+    While this prevents resource exhaustion on single-instance nodes without failing open,
+    it DOES NOT provide synchronized distributed protection across horizontally scaled clusters
+    (e.g., multiple Render container instances). In a multi-instance cluster where Redis is down
+    or unconfigured, clients could make up to (N_instances * limit) requests within the window.
+    Additionally, container restarts, redeployments, or auto-scaling events clear the local memory
+    counters. For strict cluster-wide rate limiting and abuse mitigation, Upstash Redis
+    must be configured and operational.
+    """
+    def __init__(
+        self,
+        default_limit: int = RATE_LIMIT_MAX_REQUESTS,
+        window: int = RATE_LIMIT_WINDOW,
+        enabled: bool = True
+    ):
+        self.default_limit = default_limit
+        self.window = window
+        self.enabled = enabled
+        self.requests = RATE_LIMIT_REQUESTS
+
+    def resolve_client_ip(self, request: Request) -> str:
+        """
+        Securely extracts client IP enforcing trusted proxy validation:
+        1. If the direct socket peer (request.client.host) is NOT an approved trusted proxy,
+           all forwarding headers (X-Forwarded-For, CF-Connecting-IP, X-Real-IP) are untrusted
+           and discarded to prevent origin header spoofing.
+        2. When connecting through a verified trusted proxy:
+           - If TRUST_CLOUDFLARE_PROXY is enabled, CF-Connecting-IP is honored.
+           - If TRUST_VERCEL_PROXY is enabled, X-Vercel-Forwarded-For is honored.
+           - For standard reverse proxies (Render / Nginx / ALB), X-Forwarded-For is traversed
+             right-to-left to extract the immediate untrusted client IP.
+        3. Validates all extracted candidate IPs against ipaddress syntax to prevent header injection.
+        """
+        peer_host = request.client.host.strip() if (request.client and request.client.host) else "unknown"
+
+        # If the immediate connection does NOT originate from a trusted proxy,
+        # ignore all forwarding headers to prevent origin header spoofing
+        if not is_trusted_proxy(peer_host):
+            return peer_host if is_valid_client_ip(peer_host) else "unknown"
+
+        # The connection comes from an approved proxy.
+        # Check explicitly configured edge proxies:
+        trust_cf = os.environ.get("TRUST_CLOUDFLARE_PROXY", "").lower() in ("true", "1")
+        if trust_cf:
+            cf_ip = request.headers.get("cf-connecting-ip")
+            if cf_ip and is_valid_client_ip(cf_ip.strip()) and not is_trusted_proxy(cf_ip.strip()):
+                return cf_ip.strip()
+
+        trust_vercel = os.environ.get("TRUST_VERCEL_PROXY", "").lower() in ("true", "1")
+        if trust_vercel:
+            v_ip = request.headers.get("x-vercel-forwarded-for")
+            if v_ip:
+                first_v = v_ip.split(",")[0].strip()
+                if is_valid_client_ip(first_v) and not is_trusted_proxy(first_v):
+                    return first_v
+
+        # Standard reverse proxy traversal (Render, AWS ALB, Nginx):
+        # Traverse X-Forwarded-For from rightmost (closest to proxy) to leftmost
+        forwarded_for = request.headers.get("x-forwarded-for")
+        if forwarded_for:
+            parts = [p.strip() for p in forwarded_for.split(",") if p.strip()]
+            for candidate in reversed(parts):
+                cand = candidate
+                if ":" in cand and cand.count(":") == 1:
+                    cand = cand.split(":")[0].strip()
+                if is_valid_client_ip(cand) and not is_trusted_proxy(cand):
+                    return cand
+
+        # Fallback to X-Real-IP only if explicitly configured for environments where proxy guarantees it
+        trust_real_ip = os.environ.get("TRUST_X_REAL_IP", "").lower() in ("true", "1")
+        if trust_real_ip:
+            real_ip = request.headers.get("x-real-ip")
+            if real_ip:
+                clean_real = real_ip.strip()
+                if ":" in clean_real and clean_real.count(":") == 1:
+                    clean_real = clean_real.split(":")[0].strip()
+                if is_valid_client_ip(clean_real) and not is_trusted_proxy(clean_real):
+                    return clean_real
+
+        # If no untrusted client IP found in chain, return peer host
+        return peer_host if is_valid_client_ip(peer_host) else "unknown"
+
+    def get_limit_and_key(self, client_ip: str, path: str) -> tuple[int, int, str]:
+        limit = self.default_limit
+        window = self.window
+        if "/auth/otp" in path or "/auth/reset-link" in path:
+            limit = 5
+            key = f"{client_ip}:{path}"
+        elif "/auth" in path or "/login" in path:
+            limit = 10
+            key = f"{client_ip}:{path.split('/')[2] if len(path.split('/')) > 2 else 'root'}"
+        elif "/imports" in path or "/ocr" in path:
+            limit = 20
+            key = f"{client_ip}:{path.split('/')[2] if len(path.split('/')) > 2 else 'root'}"
+        elif "/admin/reports" in path:
+            limit = 15
+            key = f"{client_ip}:reports"
+        elif "/admin" in path:
+            limit = 30
+            key = f"{client_ip}:{path.split('/')[2] if len(path.split('/')) > 2 else 'root'}"
+        else:
+            key = f"{client_ip}:{path.split('/')[2] if len(path.split('/')) > 2 else 'root'}"
+        return limit, window, key
+
+    async def check(self, request: Request) -> tuple[bool, int]:
+        """
+        Check rate limit for incoming request.
+        Returns (is_allowed: bool, retry_after: int).
+        """
+        # Determine if running in production mode
+        is_prod = (
+            os.environ.get("ENV", "").lower() == "production"
+            or os.environ.get("ENVIRONMENT", "").lower() == "production"
+            or os.environ.get("RENDER", "").lower() == "true"
+        )
+
+        # In production mode, bypass flags and disabled toggles are STRICTLY IGNORED
+        if not is_prod:
+            if not self.enabled:
+                return True, 0
+            if os.environ.get("DISABLE_RATE_LIMITING", "").lower() in ("true", "1"):
+                return True, 0
+            if os.environ.get("RATE_LIMIT_ENABLED", "").lower() in ("false", "0"):
+                return True, 0
+
+        client_ip = self.resolve_client_ip(request)
+        path = request.url.path
+        limit, window, key = self.get_limit_and_key(client_ip, path)
+        now = time.time()
+
+        # 1. Try Distributed Redis Rate Limiting first
+        redis_allowed = await check_redis_rate_limit(key, limit, window)
+        if redis_allowed is False:
+            return False, window
+        elif redis_allowed is True:
+            return True, 0
+
+        # 2. Local In-Memory Fixed-Window Fallback (when Redis is unconfigured or unavailable)
+        if len(self.requests) > 10000:
+            now_ts = now
+            expired_keys = [k for k, v in self.requests.items() if now_ts >= v.get("expires_at", 0)]
+            for k in expired_keys:
+                self.requests.pop(k, None)
+            if len(self.requests) > 10000:
+                self.requests.clear()
+
+        entry = self.requests.get(key)
+        if entry is None or now >= entry.get("expires_at", 0):
+            self.requests[key] = {
+                "count": 1,
+                "expires_at": now + window
+            }
+            return True, 0
+
+        current_count = entry.get("count", 0)
+        expires_at = entry.get("expires_at", now + window)
+        retry_after = max(1, int(expires_at - now))
+
+        if current_count >= limit:
+            return False, retry_after
+
+        entry["count"] = current_count + 1
+        return True, 0
+
+    def reset(self):
+        """Reset internal rate limit tracking state"""
+        self.requests.clear()
+
+
+rate_limiter = RateLimiter()
+
+def get_rate_limiter() -> RateLimiter:
+    """Dependency injection provider for RateLimiter"""
+    if hasattr(app, "state") and getattr(app.state, "rate_limiter", None):
+        return app.state.rate_limiter
+    return rate_limiter
 
 
 
@@ -859,73 +1317,24 @@ async def rate_limit_middleware(request: Request, call_next):
     # Lazy inline rate-limit cleanup to maintain bounded memory on serverless
     prune_expired_rate_limits()
 
-    # Exclude during unit testing, API documentation and standard schema endpoints from limit
-    is_testing = os.environ.get("TESTING") == "True" or "pytest" in sys.modules or "unittest" in sys.modules or (len(sys.argv) > 0 and "pytest" in sys.argv[0])
-    if is_testing or request.url.path in ["/docs", "/redoc", "/openapi.json"]:
-        return await call_next(request)
-        
-    vercel_ip = request.headers.get("x-vercel-forwarded-for")
-    if vercel_ip:
-        client_ip = vercel_ip.split(",")[0].strip()
-    else:
-        real_ip = request.headers.get("x-real-ip")
-        if real_ip:
-            client_ip = real_ip.split(",")[0].strip()
-        else:
-            client_ip = request.client.host if request.client else "unknown"
-            
-    path = request.url.path
-    
-    # Classify endpoint limits
-    limit = RATE_LIMIT_MAX_REQUESTS
-    window = RATE_LIMIT_WINDOW
-    if "/auth/otp" in path or "/auth/reset-link" in path:
-        limit = 5
-        key = f"{client_ip}:{path}"
-    elif "/auth" in path or "/login" in path:
-        limit = 10
-        key = f"{client_ip}:{path.split('/')[2] if len(path.split('/')) > 2 else 'root'}"
-    elif "/imports" in path or "/ocr" in path:
-        limit = 20
-        key = f"{client_ip}:{path.split('/')[2] if len(path.split('/')) > 2 else 'root'}"
-    elif "/admin/reports" in path:
-        limit = 15
-        key = f"{client_ip}:reports"
-    elif "/admin" in path:
-        limit = 30
-        key = f"{client_ip}:{path.split('/')[2] if len(path.split('/')) > 2 else 'root'}"
-    else:
-        key = f"{client_ip}:{path.split('/')[2] if len(path.split('/')) > 2 else 'root'}"
-    now = time.time()
-    
-    # 1. Try Distributed Redis Rate Limiting first
-    redis_allowed = await check_redis_rate_limit(key, limit, window)
-    if redis_allowed is False:
-        return Response(
-            content=json.dumps({"detail": "Too many requests. Please try again later."}),
-            status_code=429,
-            media_type="application/json",
-            headers={"Retry-After": str(window)}
-        )
-    elif redis_allowed is True:
+    # Documentation, schema, and operational health check endpoints are exempt from rate limiting
+    if request.url.path in ["/docs", "/redoc", "/openapi.json", "/api/health", "/health"]:
         return await call_next(request)
 
-    # 2. Local In-Memory Sliding Window Fallback (when Redis is unconfigured or unavailable)
-    if len(RATE_LIMIT_REQUESTS) > 10000:
-        RATE_LIMIT_REQUESTS.clear()
-    
-    timestamps = [t for t in RATE_LIMIT_REQUESTS.get(key, []) if now - t < window]
-    RATE_LIMIT_REQUESTS[key] = timestamps
-    
-    if len(timestamps) >= limit:
+    # Dependency injection: retrieve active rate limiter from request app state or provider
+    limiter = getattr(request.app.state, "rate_limiter", None) if hasattr(request.app, "state") else None
+    if limiter is None:
+        limiter = get_rate_limiter()
+
+    is_allowed, retry_after = await limiter.check(request)
+    if not is_allowed:
         return Response(
             content=json.dumps({"detail": "Too many requests. Please try again later."}),
             status_code=429,
             media_type="application/json",
-            headers={"Retry-After": str(window)}
+            headers={"Retry-After": str(retry_after)}
         )
-        
-    RATE_LIMIT_REQUESTS[key].append(now)
+
     return await call_next(request)
 
 
@@ -1659,11 +2068,14 @@ async def health_check():
     except Exception as e:
         ocr_status = {"error": str(e)}
 
+    rate_limiter_health = await check_redis_operational_health()
+
     return {
         "status": "error" if startup_error else "ok",
         "healthy": startup_error is None,
         "firebase_configured": firebase_initialized,
         "database_connected": client is not None and db_initialized,
+        "rate_limiter": rate_limiter_health,
         "ocr": ocr_status
     }
 
